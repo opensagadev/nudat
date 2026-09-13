@@ -1,0 +1,6 @@
+/target/
+/.cargo-home/
+/obb/
+/game.dat/
+/*.DAT
+/*.obb
