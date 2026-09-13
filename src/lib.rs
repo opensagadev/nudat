@@ -826,7 +826,9 @@ pub fn pack_with_progress(
                         )));
                     }
                     let staged_path = staging.path().join(index.to_string());
-                    let mut staged = File::create(&staged_path)?;
+                    // Buffer the 12-byte header and payload together; otherwise
+                    // every 16 KiB DFLT chunk incurs four separate file writes.
+                    let mut staged = io::BufWriter::new(File::create(&staged_path)?);
                     let mut buffer = [0u8; dflt::BLOCK_SIZE];
                     let mut left = item.size as usize;
                     let mut stored_size = 0u64;

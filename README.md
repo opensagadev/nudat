@@ -1,58 +1,109 @@
 # nudat
 
 [![CI](https://github.com/opensagadev/nudat/actions/workflows/ci.yml/badge.svg)](https://github.com/opensagadev/nudat/actions/workflows/ci.yml)
-![Rust](https://img.shields.io/badge/Rust-2021-orange)
-![License: MIT](https://img.shields.io/badge/license-MIT-blue)
+[![Rust 2021](https://img.shields.io/badge/Rust-2021-orange)](Cargo.toml)
+[![MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-A Rust library and command-line tool for Traveller's Tales Nu engine archives. Inspect, extract, edit, and rebuild PC `.DAT`, Android `.dat`, and Android `.obb` files. Payloads are streamed, so inspecting a large archive does not load it into memory.
+**Inspect, unpack, edit, and rebuild Traveller's Tales Nu engine archives.**
 
-## Quick start
+PC `.DAT`, Android `.dat`, and Android `.obb` are supported. Repacking needs only the unpacked directory.
+
+## Usage
+
+Build once, then run the CLI from this repository:
 
 ```sh
 cargo build --release
 
-target/release/nudat info GAME.DAT
-target/release/nudat list GAME.DAT --long
-target/release/nudat tree GAME.DAT --depth 3
-target/release/nudat cat GAME.DAT 'STUFF\TEXT\BADWORDS.TXT' > badwords.txt
-target/release/nudat unpack GAME.DAT game/ --jobs 8
-target/release/nudat pack game/ rebuilt.DAT --format pc --jobs 8
-target/release/nudat verify rebuilt.DAT
+./target/release/nudat info GAME.DAT
+./target/release/nudat list GAME.DAT --long
+./target/release/nudat tree GAME.DAT --depth 2
+./target/release/nudat cat GAME.DAT 'STUFF/TEXT/BADWORDS.TXT' > badwords.txt
+# After editing badwords.txt:
+./target/release/nudat edit GAME.DAT patched.DAT --put 'STUFF/TEXT/BADWORDS.TXT=badwords.txt'
 ```
 
-Android DAT and OBB archives can be rebuilt directly from a directory, with no original archive needed:
+Unpack, change files, and pack them again:
 
 ```sh
-target/release/nudat unpack main.1060.com.wb.lego.tcs.obb obb/
-target/release/nudat pack obb/ rebuilt.obb --jobs 8
-target/release/nudat verify rebuilt.obb
+./target/release/nudat unpack GAME.DAT game/
+./target/release/nudat pack game/ rebuilt.DAT
+./target/release/nudat verify rebuilt.DAT
+
+./target/release/nudat unpack main.1060.com.wb.lego.tcs.obb obb/
+./target/release/nudat pack obb/ rebuilt.obb
 ```
 
-`pack` compresses the same Android asset types as the shipped archives using fixed-Huffman `DFLT` blocks. Text, scripts, audio, and other streamed files stay uncompressed. PC entries are written uncompressed. `--format pc|android|obb` overrides the output-name default. `edit` is useful when only a few files change: it copies unchanged payloads in their original encoded form.
+| Command | Purpose |
+| --- | --- |
+| `info ARCHIVE` | Show version, file count, and sizes. |
+| `list ARCHIVE [--filter TEXT] [--long]` | List every file in directory order. |
+| `tree ARCHIVE [--filter TEXT] [--depth N]` | Summarize directories and file counts. |
+| `cat ARCHIVE PATH` | Write decoded bytes to stdout. |
+| `extract ARCHIVE PATH OUTPUT` | Save one decoded file. |
+| `unpack ARCHIVE DIR [--jobs N]` | Extract everything. |
+| `pack DIR OUTPUT [--format FORMAT] [--jobs N]` | Build an archive. |
+| `edit ARCHIVE OUTPUT --put PATH=FILE [--remove PATH]` | Replace, add, or remove files. |
+| `verify ARCHIVE` | Decode and check every entry. |
 
-```sh
-target/release/nudat edit GAME.DAT modified.DAT \
-  --put 'STUFF\TEXT\BADWORDS.TXT=badwords.txt' \
-  --remove 'OLD\FILE.BIN'
-```
+`pack` selects OBB for a `.obb` output and PC otherwise; `FORMAT` is `pc`, `android`, or `obb`. Use `--format android` for Android `.dat`. `--jobs` defaults to Rayon's available worker count. Archive paths accept `/` or `\` and ignore ASCII letter case.
 
-`list` traverses directories in order, while `tree` summarizes them with recursive file counts. Both accept `--filter`; `tree` also accepts `--depth` and `--long`. `cat` emits the decoded file bytes unchanged, including binary files. `unpack` and `pack` run on Rayon workers and show file and byte progress on stderr. Packing reports compression and writing separately. `--jobs` sets the worker count.
+Run `./target/release/nudat <command> --help` for every option.
 
-## Format notes
+## Rust library and CLI
 
-| Variant | Index version | Header | Packing |
+The `nudat` crate exposes `Archive::open`, `entries`, `read`, `copy_to`, `extract`, `unpack`, `rewrite`, and `pack`, with progress variants for bulk operations. Entries stay on disk until read.
+
+The CLI runs packing and unpacking in parallel, reports progress on stderr, and writes decoded `cat` bytes directly to stdout.
+
+## Archive formats
+
+### Variants
+
+| Variant | Index version | Prefix | New payloads |
 | --- | ---: | --- | --- |
-| PC MkDat | `-3` | 1,024-byte `MkDat v4.0` prefix | Uncompressed |
-| Android PakDat | `-5` | 512-byte `PakDat (TechRound) v1.1` prefix | Selective fixed-Huffman `DFLT` |
-| Android OBB | `-5` | 512-byte `PakDat v1.01` prefix | Selective fixed-Huffman `DFLT` |
+| PC MkDat | `-3` | 1,024 bytes; `MkDat v4.0` | Uncompressed |
+| Android PakDat | `-5` | 512 bytes; `PakDat (TechRound) v1.1` | Selective `DFLT` |
+| Android OBB | `-5` | 512 bytes; `PakDat v1.01` | Selective `DFLT` |
 
-The first eight bytes give the index offset and length as little-endian 32-bit integers. Payloads begin at 256-byte-aligned offsets. The index holds file sizes and compression modes, a directory tree and name table, then hashes sorted by the game's case-insensitive path hash. In PC `-3` archives, tree leaf numbers do not identify file records; `nudat` resolves names through the hash table. The reader supports uncompressed, `LZ2K`, and Nu `DFLT` payloads. Android packing splits compressible files into 16 KiB decoded chunks; each `DFLT` chunk has a 12-byte header followed by a single final fixed-Huffman DEFLATE block or verbatim bytes. Files that do not shrink are stored uncompressed.
+An OBB is a PakDat archive with its own prefix, not a ZIP container.
 
-Archive paths retain their original spelling. Lookups and duplicate checks fold ASCII letter case, matching the game's normal filename handling; `pack` rejects names that differ only by case.
+### Layout and index
 
-The game loader misinterprets a normal index offset above 2 GiB. `nudat` rejects archives that exceed that limit instead of producing an OBB the game cannot open. The supplied 27,493-file OBB packs to about 1.46 GB without a base. File count, tree-node count, and individual entry sizes are also limited by the format's 16-bit and 32-bit fields.
+```text
+0x00  u32 index offset
+0x04  u32 index length
+0x08  variant prefix
+      file payloads, each starting at a 256-byte boundary
+      index:
+        i32 version, i32 file count
+        file records[file count]       (16 bytes each)
+        i32 node count, nodes           (8 bytes for -3; 12 for -5)
+        i32 name-table length, names    (NUL-terminated)
+        u32 path hashes[file count]     (sorted)
+        i32 extra-hash count, i32 extra-hash length, extra data
+```
 
-The library exposes `Archive::open`, `entries`, `read`, `copy_to`, `extract`, `unpack`, `rewrite`, `pack`, and their progress variants. Progress callbacks for parallel operations are thread-safe and may arrive out of order. `unpack_with_progress` remains available for sequential callbacks.
+- **File record:** four little-endian `i32` values: offset ÷ 256, stored size, decoded size, compression mode.
+- **Tree node:** `i16` child/sibling links and a `u32` name offset; `-5` adds two `u16` fields.
+- **Paths:** backslash separators, ASCII case-insensitive lookup, original spelling preserved. Case-only duplicates are rejected.
+- **Hash:** start at `0x811c9dc5`; for each ASCII-uppercase path byte, apply `(hash ^ byte) * 0x199933` modulo `2^32`. Records follow sorted hash order.
+- **PC `-3`:** tree leaf numbers are not file-record indexes; `nudat` matches names through the hashes.
+
+### Payload encoding
+
+| Mode | Payload |
+| ---: | --- |
+| `0` | Raw bytes. |
+| `2` | `LZ2K` chunks: magic, `u32 decoded_size`, `u32 stored_size`, then data. Decode only. |
+| `3` | `DFLT` chunks: magic, `u32 stored_size`, `u32 decoded_size`, then data. |
+
+- Equal stored and decoded chunk sizes mean verbatim bytes.
+- Nu `DFLT` swaps the standard DEFLATE dynamic and stored block tags; the fixed-Huffman tag is unchanged.
+- Android packing compresses these suffixes when beneficial: `.android_etc1_tex`, `.bsa`, `.cu2`, `.etc1`, `.fpk`, `.ghg`, `.gsc`, `.ios_pcode`, `.ios_vcode`, `.pak`, `.pvrnc`, `.ter`, `.tex`.
+- Text, scripts, audio, and other streamed files stay raw. Encoded files use 16 KiB decoded chunks with one final fixed-Huffman block; incompressible chunks stay verbatim.
+
+The game treats the index offset as signed, so `nudat` rejects output whose index starts at or above 2 GiB. File and tree references are signed 16-bit; individual sizes use signed 32-bit fields.
 
 ## Development
 
@@ -62,4 +113,4 @@ cargo clippy --all-targets -- -D warnings
 cargo test --all-targets
 ```
 
-Licensed under MIT. Game assets are not included.
+MIT licensed. Game assets are not included.
