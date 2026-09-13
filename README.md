@@ -4,51 +4,52 @@
 [![Rust 2021](https://img.shields.io/badge/Rust-2021-orange)](Cargo.toml)
 [![MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-**Inspect, unpack, edit, and rebuild Traveller's Tales Nu engine archives.**
+**Inspect, unpack, edit, and repack Traveller's Tales Nu engine archives.**
 
-PC `.DAT`, Android `.dat`, and Android `.obb` are supported. Repacking needs only the unpacked directory.
+PC `.DAT`, Android `.dat`, and Android `.obb` are supported.
 
 ## Usage
 
-Build once, then run the CLI from this repository:
+Build the release CLI with Cargo. The executable is `./target/release/nudat`; add its directory to `PATH` to use the examples below:
 
 ```sh
 cargo build --release
+export PATH="$PWD/target/release:$PATH"
 
-./target/release/nudat info GAME.DAT
-./target/release/nudat list GAME.DAT --long
-./target/release/nudat tree GAME.DAT --depth 2
-./target/release/nudat cat GAME.DAT 'STUFF/TEXT/BADWORDS.TXT' > badwords.txt
+nudat info GAME.DAT
+nudat list GAME.DAT --long
+nudat tree GAME.DAT --depth 2
+nudat cat GAME.DAT 'STUFF/TEXT/BADWORDS.TXT' > badwords.txt
 # After editing badwords.txt:
-./target/release/nudat edit GAME.DAT patched.DAT --put 'STUFF/TEXT/BADWORDS.TXT=badwords.txt'
+nudat edit GAME.DAT patched.DAT --put 'STUFF/TEXT/BADWORDS.TXT=badwords.txt'
 ```
 
 Unpack, change files, and pack them again:
 
 ```sh
-./target/release/nudat unpack GAME.DAT game/
-./target/release/nudat pack game/ rebuilt.DAT
-./target/release/nudat verify rebuilt.DAT
+nudat unpack GAME.DAT game/
+nudat pack game/ rebuilt.DAT
+nudat verify rebuilt.DAT
 
-./target/release/nudat unpack main.1060.com.wb.lego.tcs.obb obb/
-./target/release/nudat pack obb/ rebuilt.obb
+nudat unpack main.1060.com.wb.lego.tcs.obb obb/
+nudat pack obb/ rebuilt.obb
 ```
 
 | Command | Purpose |
 | --- | --- |
-| `info ARCHIVE` | Show version, file count, and sizes. |
-| `list ARCHIVE [--filter TEXT] [--long]` | List every file in directory order. |
-| `tree ARCHIVE [--filter TEXT] [--depth N]` | Summarize directories and file counts. |
-| `cat ARCHIVE PATH` | Write decoded bytes to stdout. |
-| `extract ARCHIVE PATH OUTPUT` | Save one decoded file. |
-| `unpack ARCHIVE DIR [--jobs N]` | Extract everything. |
-| `pack DIR OUTPUT [--format FORMAT] [--jobs N]` | Build an archive. |
-| `edit ARCHIVE OUTPUT --put PATH=FILE [--remove PATH]` | Replace, add, or remove files. |
-| `verify ARCHIVE` | Decode and check every entry. |
+| `nudat info ARCHIVE` | Show version, file count, and sizes. |
+| `nudat list ARCHIVE [--filter TEXT] [--long]` | List every file in directory order. |
+| `nudat tree ARCHIVE [--filter TEXT] [--depth N]` | Summarize directories and file counts. |
+| `nudat cat ARCHIVE PATH` | Write decoded bytes to stdout. |
+| `nudat extract ARCHIVE PATH OUTPUT` | Save one decoded file. |
+| `nudat unpack ARCHIVE DIR [--jobs N]` | Extract everything. |
+| `nudat pack DIR OUTPUT [--format FORMAT] [--jobs N]` | Build an archive. |
+| `nudat edit ARCHIVE OUTPUT --put PATH=FILE [--remove PATH]` | Replace, add, or remove files. |
+| `nudat verify ARCHIVE` | Decode and check every entry. |
 
 `pack` selects OBB for a `.obb` output and PC otherwise; `FORMAT` is `pc`, `android`, or `obb`. Use `--format android` for Android `.dat`. `--jobs` defaults to Rayon's available worker count. Archive paths accept `/` or `\` and ignore ASCII letter case.
 
-Run `./target/release/nudat <command> --help` for every option.
+Run `nudat <command> --help` for every option.
 
 ## Rust library and CLI
 
