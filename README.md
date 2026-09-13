@@ -10,12 +10,15 @@ PC `.DAT`, Android `.dat`, and Android `.obb` are supported.
 
 ## Usage
 
-Build the release CLI with Cargo. The executable is `./target/release/nudat`; add its directory to `PATH` to use the examples below:
+Build the release CLI:
 
 ```sh
 cargo build --release
-export PATH="$PWD/target/release:$PATH"
+```
 
+The executable is `./target/release/nudat`. Commands below use `nudat` for brevity.
+
+```sh
 nudat info GAME.DAT
 nudat list GAME.DAT --long
 nudat tree GAME.DAT --depth 2
@@ -67,7 +70,20 @@ The CLI runs packing and unpacking in parallel, reports progress on stderr, and 
 | Android PakDat | `-5` | 512 bytes; `PakDat (TechRound) v1.1` | Selective `DFLT` |
 | Android OBB | `-5` | 512 bytes; `PakDat v1.01` | Selective `DFLT` |
 
-An OBB is a PakDat archive with its own prefix, not a ZIP container.
+### Android OBB
+
+An OBB is a standalone PakDat archive, not a ZIP container. Its 512-byte prefix is:
+
+```text
+0x000  u32 index offset
+0x004  u32 index length
+0x008  "BEGIN_APP_ID_STRINGPakDat v1.01END_APP_ID_STRING\0"
+       zero padding through 0x1ff
+0x200  256-byte-aligned file payloads
+       -5 index at the recorded offset
+```
+
+Android `.dat` has the same index, tree, and payload encoding, but identifies itself as `PakDat (TechRound) v1.1`. An OBB can be repacked from the extracted files alone.
 
 ### Layout and index
 
