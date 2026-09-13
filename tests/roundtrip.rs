@@ -1,6 +1,8 @@
+use flate2::write::DeflateEncoder;
 use nudat::{pack, pack_with_progress, Archive, Compression, Format, NudatError, PackPhase};
 use std::collections::HashSet;
 use std::fs;
+use std::io::Write;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -253,12 +255,48 @@ fn obb_repack_preserves_unchanged_files_and_reports_both_phases() {
     let temp = tempdir().unwrap();
     let input = temp.path().join("input");
     fs::create_dir_all(&input).unwrap();
-    fs::write(input.join("same.bin"), vec![b'A'; 300 * 1024]).unwrap();
+    fs::write(input.join("same.bin"), vec![b'A'; 32 * 1024]).unwrap();
     fs::write(input.join("changed.bin"), b"before").unwrap();
     fs::write(input.join("removed.bin"), b"remove").unwrap();
     let base_path = temp.path().join("base.obb");
     pack(&input, &base_path, Format::Obb).unwrap();
+    let raw = Archive::open(&base_path).unwrap();
+    let same = raw.entry("same.bin").unwrap();
+    let mut encoder = DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(&vec![b'A'; 32 * 1024]).unwrap();
+    let mut encoded = encoder.finish().unwrap();
+    assert_eq!(encoded[0] & 1, 1);
+    match (encoded[0] >> 1) & 3 {
+        1 => {}
+        2 => encoded[0] &= !0b110,
+        other => panic!("unexpected DEFLATE block type {other}"),
+    }
+    let mut bytes = fs::read(&base_path).unwrap();
+    let start = same.offset as usize;
+    let stored = (12 + encoded.len()) as u32;
+    assert!(stored < same.stored_size);
+    bytes[start..start + 4].copy_from_slice(b"DFLT");
+    bytes[start + 4..start + 8].copy_from_slice(&(encoded.len() as u32).to_le_bytes());
+    bytes[start + 8..start + 12].copy_from_slice(&(32 * 1024u32).to_le_bytes());
+    bytes[start + 12..start + 12 + encoded.len()].copy_from_slice(&encoded);
+    let index = u32::from_le_bytes(bytes[..4].try_into().unwrap()) as usize;
+    let count = u32::from_le_bytes(bytes[index + 4..index + 8].try_into().unwrap()) as usize;
+    let record = (0..count)
+        .map(|position| index + 8 + position * 16)
+        .find(|&record| {
+            u32::from_le_bytes(bytes[record..record + 4].try_into().unwrap())
+                == (same.offset / 256) as u32
+        })
+        .unwrap();
+    bytes[record + 4..record + 8].copy_from_slice(&stored.to_le_bytes());
+    bytes[record + 12..record + 16].copy_from_slice(&3u32.to_le_bytes());
+    fs::write(&base_path, bytes).unwrap();
     let base = Archive::open(&base_path).unwrap();
+    assert_eq!(
+        base.entry("same.bin").unwrap().compression,
+        Compression::Deflate
+    );
+    assert_eq!(base.read("same.bin").unwrap(), vec![b'A'; 32 * 1024]);
     fs::write(input.join("changed.bin"), b"after").unwrap();
     fs::remove_file(input.join("removed.bin")).unwrap();
     fs::write(input.join("added.bin"), b"added").unwrap();
@@ -272,7 +310,7 @@ fn obb_repack_preserves_unchanged_files_and_reports_both_phases() {
     let dat = Archive::open(&output).unwrap();
     dat.verify().unwrap();
     assert_eq!(dat.format(), Some(Format::Obb));
-    assert_eq!(dat.read("same.bin").unwrap(), vec![b'A'; 300 * 1024]);
+    assert_eq!(dat.read("same.bin").unwrap(), vec![b'A'; 32 * 1024]);
     assert_eq!(dat.read("changed.bin").unwrap(), b"after");
     assert_eq!(dat.read("added.bin").unwrap(), b"added");
     assert!(dat.entry("removed.bin").is_none());
