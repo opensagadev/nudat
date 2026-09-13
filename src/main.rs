@@ -461,14 +461,7 @@ fn run() -> Result<()> {
                     OutputFormat::Pc
                 }
             });
-            let encode_progress = TransferProgress::new(
-                if matches!(inferred_format, OutputFormat::Pc) {
-                    "scan"
-                } else {
-                    "compress"
-                },
-                0,
-            )?;
+            let encode_progress = TransferProgress::new("compress", 0)?;
             let write_progress = TransferProgress::new("pack", 0)?;
             let update = |phase: PackPhase,
                           path: &str,

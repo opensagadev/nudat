@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 
 const ALIGN: u64 = 256;
+const PACK_BLOCK_SIZE: usize = 16 * 1024;
 
 /// Errors returned by DAT operations.
 #[derive(Debug, thiserror::Error)]
@@ -749,8 +750,8 @@ pub fn pack(directory: impl AsRef<Path>, output: impl AsRef<Path>, format: Forma
     pack_with_progress(directory, output, format, |_, _, _, _, _, _| {})
 }
 
-/// Pack a directory in parallel. Android DAT and OBB entries use game-compatible
-/// fixed-Huffman DFLT blocks when that reduces their stored size.
+/// Pack a directory in parallel. PC entries use LZ2K and Android DAT/OBB
+/// entries use game-compatible fixed-Huffman DFLT when compression helps.
 /// Progress reports the phase, current path, completed files, cumulative bytes,
 /// total files, and total bytes. Callbacks may arrive out of order within a phase.
 pub fn pack_with_progress(
@@ -795,15 +796,9 @@ pub fn pack_with_progress(
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
-    let staging = if format == Format::Pc {
-        None
-    } else {
-        Some(
-            tempfile::Builder::new()
-                .prefix(".nudat-")
-                .tempdir_in(output_parent)?,
-        )
-    };
+    let staging = tempfile::Builder::new()
+        .prefix(".nudat-")
+        .tempdir_in(output_parent)?;
     pending
         .par_iter_mut()
         .enumerate()
@@ -816,8 +811,12 @@ pub fn pack_with_progress(
                 total_files,
                 total_bytes,
             );
-            if let (Some(staging), Source::Disk(path)) = (&staging, &item.source) {
-                if item.size != 0 && dflt::should_compress(&item.path) {
+            if let Source::Disk(path) = &item.source {
+                let compress = match format {
+                    Format::Pc => lz2k::should_compress(&item.path),
+                    Format::Android | Format::Obb => dflt::should_compress(&item.path),
+                };
+                if item.size != 0 && compress {
                     let mut source = File::open(path)?;
                     if source.metadata()?.len() != item.size as u64 {
                         return Err(input(format!(
@@ -826,20 +825,29 @@ pub fn pack_with_progress(
                         )));
                     }
                     let staged_path = staging.path().join(index.to_string());
-                    // Buffer the 12-byte header and payload together; otherwise
-                    // every 16 KiB DFLT chunk incurs four separate file writes.
+                    // Buffer each header and payload together to avoid four
+                    // separate writes per 16 KiB chunk.
                     let mut staged = io::BufWriter::new(File::create(&staged_path)?);
-                    let mut buffer = [0u8; dflt::BLOCK_SIZE];
+                    let mut buffer = [0u8; PACK_BLOCK_SIZE];
                     let mut left = item.size as usize;
                     let mut stored_size = 0u64;
                     let mut since_report = 0usize;
                     while left != 0 {
                         let length = left.min(buffer.len());
                         source.read_exact(&mut buffer[..length])?;
-                        let block = dflt::encode_block(&buffer[..length]);
-                        staged.write_all(b"DFLT")?;
-                        staged.write_all(&(block.len() as u32).to_le_bytes())?;
-                        staged.write_all(&(length as u32).to_le_bytes())?;
+                        let block = match format {
+                            Format::Pc => lz2k::encode_block(&buffer[..length]),
+                            Format::Android | Format::Obb => dflt::encode_block(&buffer[..length]),
+                        };
+                        if format == Format::Pc {
+                            staged.write_all(b"LZ2K")?;
+                            staged.write_all(&(length as u32).to_le_bytes())?;
+                            staged.write_all(&(block.len() as u32).to_le_bytes())?;
+                        } else {
+                            staged.write_all(b"DFLT")?;
+                            staged.write_all(&(block.len() as u32).to_le_bytes())?;
+                            staged.write_all(&(length as u32).to_le_bytes())?;
+                        }
                         staged.write_all(&block)?;
                         stored_size += 12 + block.len() as u64;
                         left -= length;
@@ -867,7 +875,11 @@ pub fn pack_with_progress(
                         staged.flush()?;
                         item.source = Source::Disk(staged_path);
                         item.stored_size = stored_size as u32;
-                        item.compression = Compression::Deflate;
+                        item.compression = if format == Format::Pc {
+                            Compression::Lz2k
+                        } else {
+                            Compression::Deflate
+                        };
                     }
                 } else {
                     bytes_encoded.fetch_add(item.size as u64, Ordering::Relaxed);

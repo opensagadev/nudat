@@ -324,6 +324,70 @@ fn standalone_android_packing_uses_only_game_supported_blocks() {
 }
 
 #[test]
+fn pc_packing_encodes_lz2k_assets_and_keeps_streamed_files_raw() {
+    let temp = tempdir().unwrap();
+    let input = temp.path().join("input");
+    fs::create_dir_all(&input).unwrap();
+
+    let mut seed = 0x1234_5678u32;
+    let mut random = Vec::with_capacity(16 * 1024);
+    for _ in 0..16 * 1024 {
+        seed ^= seed << 13;
+        seed ^= seed >> 17;
+        seed ^= seed << 5;
+        random.push((seed >> 24) as u8);
+    }
+    let mut contents = vec![b'A'; 16 * 1024];
+    contents.extend_from_slice(&random);
+    for _ in 0..16 {
+        contents.extend_from_slice(&random[..1024]);
+    }
+    fs::write(input.join("mixed.GhG"), &contents).unwrap();
+    let mut window = random[..8192].to_vec();
+    window.extend_from_slice(&random[..8192]);
+    fs::write(input.join("window.DDS"), &window).unwrap();
+    fs::write(input.join("script.SCP"), vec![b'A'; 64 * 1024]).unwrap();
+
+    let archive = temp.path().join("rebuilt.DAT");
+    pack(&input, &archive, Format::Pc).unwrap();
+    let dat = Archive::open(&archive).unwrap();
+    dat.verify().unwrap();
+    assert_eq!(dat.read("MIXED.ghg").unwrap(), contents);
+    assert_eq!(dat.read("WINDOW.dds").unwrap(), window);
+    assert_eq!(
+        dat.entry("window.dds").unwrap().compression,
+        Compression::Lz2k
+    );
+    assert_eq!(
+        dat.entry("script.scp").unwrap().compression,
+        Compression::None
+    );
+
+    let entry = dat.entry("mixed.ghg").unwrap();
+    assert_eq!(entry.compression, Compression::Lz2k);
+    assert!(entry.stored_size < entry.size);
+    let bytes = fs::read(&archive).unwrap();
+    let mut at = entry.offset as usize;
+    let end = at + entry.stored_size as usize;
+    let mut compressed_chunks = 0;
+    let mut raw_chunks = 0;
+    while at < end {
+        assert_eq!(&bytes[at..at + 4], b"LZ2K");
+        let decoded = u32::from_le_bytes(bytes[at + 4..at + 8].try_into().unwrap()) as usize;
+        let stored = u32::from_le_bytes(bytes[at + 8..at + 12].try_into().unwrap()) as usize;
+        assert_eq!(decoded, 16 * 1024);
+        at += 12 + stored;
+        if stored == decoded {
+            raw_chunks += 1;
+        } else {
+            compressed_chunks += 1;
+        }
+    }
+    assert_eq!(at, end);
+    assert_eq!((compressed_chunks, raw_chunks), (2, 1));
+}
+
+#[test]
 fn mixed_case_paths_survive_pack_unpack_and_edit() {
     for format in [Format::Pc, Format::Android, Format::Obb] {
         let temp = tempdir().unwrap();

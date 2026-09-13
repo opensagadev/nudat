@@ -66,7 +66,7 @@ The CLI runs packing and unpacking in parallel, reports progress on stderr, and 
 
 | Variant | Index version | Prefix | New payloads |
 | --- | ---: | --- | --- |
-| PC MkDat | `-3` | 1,024 bytes; `MkDat v4.0` | Uncompressed |
+| PC MkDat | `-3` | 1,024 bytes; `MkDat v4.0` | Selective `LZ2K` |
 | Android PakDat | `-5` | 512 bytes; `PakDat (TechRound) v1.1` | Selective `DFLT` |
 | Android OBB | `-5` | 512 bytes; `PakDat v1.01` | Selective `DFLT` |
 
@@ -112,13 +112,14 @@ Android `.dat` has the same index, tree, and payload encoding, but identifies it
 | Mode | Payload |
 | ---: | --- |
 | `0` | Raw bytes. |
-| `2` | `LZ2K` chunks: magic, `u32 decoded_size`, `u32 stored_size`, then data. Decode only. |
+| `2` | `LZ2K` chunks: magic, `u32 decoded_size`, `u32 stored_size`, then data. |
 | `3` | `DFLT` chunks: magic, `u32 stored_size`, `u32 decoded_size`, then data. |
 
 - Equal stored and decoded chunk sizes mean verbatim bytes.
+- `LZ2K` uses Huffman-coded literals and lengths with back-references up to 8 KiB. PC packing compresses `.an3`, `.bsa`, `.dds`, `.fpk`, `.ghg`, `.gsc`, `.pak`, and `.ter` when beneficial.
 - Nu `DFLT` swaps the standard DEFLATE dynamic and stored block tags; the fixed-Huffman tag is unchanged.
 - Android packing compresses these suffixes when beneficial: `.android_etc1_tex`, `.bsa`, `.cu2`, `.etc1`, `.fpk`, `.ghg`, `.gsc`, `.ios_pcode`, `.ios_vcode`, `.pak`, `.pvrnc`, `.ter`, `.tex`.
-- Text, scripts, audio, and other streamed files stay raw. Encoded files use 16 KiB decoded chunks with one final fixed-Huffman block; incompressible chunks stay verbatim.
+- Text, scripts, audio, and other streamed files stay raw. Encoded files use 16 KiB decoded chunks; incompressible chunks stay verbatim. Compressed Android chunks use one final fixed-Huffman block.
 
 The game treats the index offset as signed, so `nudat` rejects output whose index starts at or above 2 GiB. File and tree references are signed 16-bit; individual sizes use signed 32-bit fields.
 

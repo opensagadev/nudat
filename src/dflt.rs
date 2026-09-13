@@ -10,8 +10,6 @@ use miniz_oxide::deflate::core::{
     TDEFLFlush, TDEFLStatus,
 };
 
-pub(crate) const BLOCK_SIZE: usize = 16 * 1024;
-
 /// The shipped Android archives compress these asset types. Text, scripts,
 /// audio, and other streamed files remain uncompressed even when they would
 /// shrink, so they follow the same read paths in the game as the originals.
