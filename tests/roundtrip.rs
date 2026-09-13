@@ -1,8 +1,6 @@
-use flate2::write::DeflateEncoder;
 use nudat::{pack, pack_with_progress, Archive, Compression, Format, NudatError, PackPhase};
 use std::collections::HashSet;
 use std::fs;
-use std::io::Write;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -251,83 +249,136 @@ fn parallel_pack_matches_sequential_writer_and_reports_progress() {
 }
 
 #[test]
-fn obb_repack_preserves_unchanged_files_and_reports_both_phases() {
+fn standalone_android_packing_uses_only_game_supported_blocks() {
+    let mut contents = vec![b'A'; 16 * 1024];
+    let mut random = vec![0u8; 16 * 1024];
+    let mut state = 0x1234_5678u32;
+    for byte in &mut random {
+        state ^= state << 13;
+        state ^= state >> 17;
+        state ^= state << 5;
+        *byte = state as u8;
+    }
+    contents.extend_from_slice(&random);
+    contents.extend(vec![b'B'; 16 * 1024]);
+
+    for format in [Format::Android, Format::Obb] {
+        let temp = tempdir().unwrap();
+        let input = temp.path().join("input");
+        fs::create_dir_all(&input).unwrap();
+        fs::write(input.join("mixed.gsc"), &contents).unwrap();
+        for extension in ["txt", "scp", "ptl", "wav", "ogg", "an3"] {
+            fs::write(
+                input.join(format!("startup.{extension}")),
+                vec![b'A'; 64 * 1024],
+            )
+            .unwrap();
+        }
+        let output = temp.path().join("rebuilt.obb");
+        let phases = Mutex::new(HashSet::new());
+        pack_with_progress(&input, &output, format, |phase, _, files, _, total, _| {
+            phases.lock().unwrap().insert(phase);
+            assert!(files <= total);
+        })
+        .unwrap();
+        let dat = Archive::open(&output).unwrap();
+        dat.verify().unwrap();
+        assert_eq!(dat.format(), Some(format));
+        assert_eq!(dat.read("mixed.gsc").unwrap(), contents);
+        for extension in ["txt", "scp", "ptl", "wav", "ogg", "an3"] {
+            assert_eq!(
+                dat.entry(&format!("startup.{extension}"))
+                    .unwrap()
+                    .compression,
+                Compression::None
+            );
+        }
+        let entry = dat.entry("mixed.gsc").unwrap();
+        assert_eq!(entry.compression, Compression::Deflate);
+        let bytes = fs::read(&output).unwrap();
+        let mut at = entry.offset as usize;
+        let end = at + entry.stored_size as usize;
+        let mut fixed = 0;
+        let mut raw = 0;
+        while at < end {
+            assert_eq!(&bytes[at..at + 4], b"DFLT");
+            let stored = u32::from_le_bytes(bytes[at + 4..at + 8].try_into().unwrap()) as usize;
+            let decoded = u32::from_le_bytes(bytes[at + 8..at + 12].try_into().unwrap()) as usize;
+            assert!(decoded <= 16 * 1024);
+            at += 12;
+            if stored == decoded {
+                raw += 1;
+            } else {
+                assert_eq!(bytes[at] & 0b111, 0b011);
+                fixed += 1;
+            }
+            at += stored;
+        }
+        assert_eq!(at, end);
+        assert!(fixed > 0 && raw > 0);
+        assert_eq!(
+            *phases.lock().unwrap(),
+            HashSet::from([PackPhase::Encode, PackPhase::Write])
+        );
+    }
+}
+
+#[test]
+fn mixed_case_paths_survive_pack_unpack_and_edit() {
+    for format in [Format::Pc, Format::Android, Format::Obb] {
+        let temp = tempdir().unwrap();
+        let input = temp.path().join("input");
+        let relative = "ChArS/WeIrDo/all_Textures.fpk";
+        fs::create_dir_all(input.join("ChArS/WeIrDo")).unwrap();
+        fs::write(input.join(relative), b"original").unwrap();
+        let archive = temp.path().join("mixed.dat");
+        pack(&input, &archive, format).unwrap();
+
+        let dat = Archive::open(&archive).unwrap();
+        assert_eq!(
+            dat.entry("chars\\weirdo\\ALL_TEXTURES.FPK").unwrap().path,
+            "ChArS\\WeIrDo\\all_Textures.fpk"
+        );
+        assert_eq!(
+            dat.read("CHARS/weirdo/all_textures.fpk").unwrap(),
+            b"original"
+        );
+        let unpacked = temp.path().join("unpacked");
+        dat.unpack(&unpacked).unwrap();
+        assert_eq!(fs::read(unpacked.join(relative)).unwrap(), b"original");
+
+        let replacement = temp.path().join("replacement");
+        fs::write(&replacement, b"updated").unwrap();
+        let edited = temp.path().join("edited.dat");
+        dat.rewrite(
+            &edited,
+            &[("CHARS/WEIRDO/ALL_TEXTURES.FPK".into(), replacement)],
+            &[],
+        )
+        .unwrap();
+        let edited = Archive::open(&edited).unwrap();
+        assert_eq!(edited.entries()[0].path, "ChArS\\WeIrDo\\all_Textures.fpk");
+        assert_eq!(
+            edited.read("chars/weirdo/ALL_TEXTURES.FPK").unwrap(),
+            b"updated"
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn pack_rejects_case_insensitive_duplicate_filenames() {
     let temp = tempdir().unwrap();
     let input = temp.path().join("input");
     fs::create_dir_all(&input).unwrap();
-    fs::write(input.join("same.bin"), vec![b'A'; 32 * 1024]).unwrap();
-    fs::write(input.join("changed.bin"), b"before").unwrap();
-    fs::write(input.join("removed.bin"), b"remove").unwrap();
-    let base_path = temp.path().join("base.obb");
-    pack(&input, &base_path, Format::Obb).unwrap();
-    let raw = Archive::open(&base_path).unwrap();
-    let same = raw.entry("same.bin").unwrap();
-    let mut encoder = DeflateEncoder::new(Vec::new(), flate2::Compression::default());
-    encoder.write_all(&vec![b'A'; 32 * 1024]).unwrap();
-    let mut encoded = encoder.finish().unwrap();
-    assert_eq!(encoded[0] & 1, 1);
-    match (encoded[0] >> 1) & 3 {
-        1 => {}
-        2 => encoded[0] &= !0b110,
-        other => panic!("unexpected DEFLATE block type {other}"),
-    }
-    let mut bytes = fs::read(&base_path).unwrap();
-    let start = same.offset as usize;
-    let stored = (12 + encoded.len()) as u32;
-    assert!(stored < same.stored_size);
-    bytes[start..start + 4].copy_from_slice(b"DFLT");
-    bytes[start + 4..start + 8].copy_from_slice(&(encoded.len() as u32).to_le_bytes());
-    bytes[start + 8..start + 12].copy_from_slice(&(32 * 1024u32).to_le_bytes());
-    bytes[start + 12..start + 12 + encoded.len()].copy_from_slice(&encoded);
-    let index = u32::from_le_bytes(bytes[..4].try_into().unwrap()) as usize;
-    let count = u32::from_le_bytes(bytes[index + 4..index + 8].try_into().unwrap()) as usize;
-    let record = (0..count)
-        .map(|position| index + 8 + position * 16)
-        .find(|&record| {
-            u32::from_le_bytes(bytes[record..record + 4].try_into().unwrap())
-                == (same.offset / 256) as u32
-        })
-        .unwrap();
-    bytes[record + 4..record + 8].copy_from_slice(&stored.to_le_bytes());
-    bytes[record + 12..record + 16].copy_from_slice(&3u32.to_le_bytes());
-    fs::write(&base_path, bytes).unwrap();
-    let base = Archive::open(&base_path).unwrap();
-    assert_eq!(
-        base.entry("same.bin").unwrap().compression,
-        Compression::Deflate
-    );
-    assert_eq!(base.read("same.bin").unwrap(), vec![b'A'; 32 * 1024]);
-    fs::write(input.join("changed.bin"), b"after").unwrap();
-    fs::remove_file(input.join("removed.bin")).unwrap();
-    fs::write(input.join("added.bin"), b"added").unwrap();
-    let output = temp.path().join("rebuilt.obb");
-    let phases = Mutex::new(HashSet::new());
-    base.repack_with_progress(&input, &output, |phase, _, files, _, total, _| {
-        phases.lock().unwrap().insert(phase);
-        assert!(files <= total);
-    })
-    .unwrap();
-    let dat = Archive::open(&output).unwrap();
-    dat.verify().unwrap();
-    assert_eq!(dat.format(), Some(Format::Obb));
-    assert_eq!(dat.read("same.bin").unwrap(), vec![b'A'; 32 * 1024]);
-    assert_eq!(dat.read("changed.bin").unwrap(), b"after");
-    assert_eq!(dat.read("added.bin").unwrap(), b"added");
-    assert!(dat.entry("removed.bin").is_none());
-    let old = base.entry("same.bin").unwrap();
-    let new = dat.entry("same.bin").unwrap();
-    assert_eq!(old.compression, new.compression);
-    assert_eq!(old.stored_size, new.stored_size);
-    let old_bytes = fs::read(base_path).unwrap();
-    let new_bytes = fs::read(output).unwrap();
-    assert_eq!(
-        &old_bytes[old.offset as usize..old.offset as usize + old.stored_size as usize],
-        &new_bytes[new.offset as usize..new.offset as usize + new.stored_size as usize]
-    );
-    assert_eq!(
-        *phases.lock().unwrap(),
-        HashSet::from([PackPhase::Compare, PackPhase::Write])
-    );
+    fs::write(input.join("FOO.txt"), b"one").unwrap();
+    fs::write(input.join("foo.TXT"), b"two").unwrap();
+    let output = temp.path().join("duplicate.obb");
+    let error = pack(&input, &output, Format::Obb).unwrap_err();
+    assert!(error
+        .to_string()
+        .contains("duplicate case-insensitive input path"));
+    assert!(!output.exists());
 }
 
 #[test]

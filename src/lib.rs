@@ -5,6 +5,7 @@
 
 #![allow(unstable_name_collisions)]
 
+mod dflt;
 mod lz2k;
 
 use binrw::{BinRead, BinReaderExt, BinWrite, BinWriterExt};
@@ -218,7 +219,7 @@ struct ParallelProgressWriter<'a, W, F> {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum PackPhase {
-    Compare,
+    Encode,
     Write,
 }
 
@@ -233,27 +234,6 @@ struct PackProgressWriter<'a, W> {
     total_files: usize,
     total_bytes: u64,
     since_report: u64,
-}
-
-struct CompareWriter {
-    file: File,
-    scratch: Vec<u8>,
-    matches: bool,
-}
-
-impl Write for CompareWriter {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        if self.matches {
-            self.scratch.resize(bytes.len(), 0);
-            self.file.read_exact(&mut self.scratch)?;
-            self.matches = self.scratch == bytes;
-        }
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
 }
 
 impl<W: Write> Write for PackProgressWriter<'_, W> {
@@ -686,13 +666,17 @@ impl Archive {
             }
         }
         for (name, disk) in replacements {
-            let path = normalize(name)?;
+            let requested_path = normalize(name)?;
+            let key = requested_path.to_ascii_uppercase();
+            let path = self
+                .entry(&requested_path)
+                .map_or(requested_path, |entry| entry.path.clone());
             let size = fs::metadata(disk)?.len();
             if size > i32::MAX as u64 {
                 return Err(input("replacement file exceeds DAT entry size limit"));
             }
             pending.insert(
-                path.to_ascii_uppercase(),
+                key,
                 Pending {
                     path,
                     source: Source::Disk(disk.clone()),
@@ -709,137 +693,6 @@ impl Archive {
             pending.into_values().collect(),
             Some(&self.path),
             None,
-        )
-    }
-
-    /// Rebuild from a directory, preserving encoded bytes for files whose decoded
-    /// contents match this archive. Changed and added files are stored uncompressed.
-    pub fn repack(&self, directory: impl AsRef<Path>, output: impl AsRef<Path>) -> Result<()> {
-        self.repack_with_progress(directory, output, |_, _, _, _, _, _| {})
-    }
-
-    /// Like `repack`, with progress for the comparison and writing phases.
-    pub fn repack_with_progress(
-        &self,
-        directory: impl AsRef<Path>,
-        output: impl AsRef<Path>,
-        progress: impl Fn(PackPhase, &str, usize, u64, usize, u64) + Send + Sync,
-    ) -> Result<()> {
-        let root = directory.as_ref();
-        if !root.is_dir() {
-            return Err(input("input is not a directory"));
-        }
-        if output.as_ref() == self.path
-            || (output.as_ref().exists()
-                && fs::canonicalize(output.as_ref())? == fs::canonicalize(&self.path)?)
-        {
-            return Err(input("repack to a different output path than the original"));
-        }
-        let mut files = Vec::new();
-        collect_directory(root, root, &mut files)?;
-        let mut by_path = BTreeMap::new();
-        for item in files {
-            let key = item.path.to_ascii_uppercase();
-            if by_path.insert(key, item).is_some() {
-                return Err(input("duplicate case-insensitive input path"));
-            }
-        }
-        let total_files = self.entries.len();
-        let total_bytes = self.entries.iter().map(|entry| entry.size as u64).sum();
-        let files_completed = AtomicUsize::new(0);
-        let bytes_checked = AtomicU64::new(0);
-        let decisions = self
-            .entries
-            .par_iter()
-            .map(|entry| -> Result<bool> {
-                let current = by_path.get(&entry.path.to_ascii_uppercase());
-                progress(
-                    PackPhase::Compare,
-                    &entry.path,
-                    files_completed.load(Ordering::Relaxed),
-                    bytes_checked.load(Ordering::Relaxed),
-                    total_files,
-                    total_bytes,
-                );
-                let matches = if let Some(item) = current.filter(|item| item.size == entry.size) {
-                    let Source::Disk(path) = &item.source else {
-                        return Err(input("directory item is not a disk file"));
-                    };
-                    let compare = CompareWriter {
-                        file: File::open(path)?,
-                        scratch: Vec::new(),
-                        matches: true,
-                    };
-                    let callback = |entry: &Entry, files: usize, bytes: u64| {
-                        progress(
-                            PackPhase::Compare,
-                            &entry.path,
-                            files,
-                            bytes,
-                            total_files,
-                            total_bytes,
-                        );
-                    };
-                    let mut writer = ParallelProgressWriter {
-                        writer: compare,
-                        callback: &callback,
-                        entry,
-                        files_completed: &files_completed,
-                        total_written: &bytes_checked,
-                        since_report: 0,
-                    };
-                    self.copy_entry_to(entry, &mut writer)?;
-                    writer.writer.matches
-                } else {
-                    bytes_checked.fetch_add(entry.size as u64, Ordering::Relaxed);
-                    false
-                };
-                let completed = files_completed.fetch_add(1, Ordering::Relaxed) + 1;
-                progress(
-                    PackPhase::Compare,
-                    &entry.path,
-                    completed,
-                    bytes_checked.load(Ordering::Relaxed),
-                    total_files,
-                    total_bytes,
-                );
-                Ok(matches)
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let mut pending = Vec::with_capacity(by_path.len());
-        let mut original_paths = HashSet::new();
-        for (entry, matches) in self.entries.iter().zip(decisions) {
-            let key = entry.path.to_ascii_uppercase();
-            original_paths.insert(key.clone());
-            if let Some(item) = by_path.get(&key) {
-                if matches {
-                    pending.push(Pending {
-                        path: entry.path.clone(),
-                        source: Source::Stored {
-                            offset: entry.offset,
-                            size: entry.stored_size,
-                        },
-                        size: entry.size,
-                        stored_size: entry.stored_size,
-                        compression: entry.compression,
-                    });
-                } else {
-                    pending.push(item.clone());
-                }
-            }
-        }
-        for (key, item) in by_path {
-            if !original_paths.contains(&key) {
-                pending.push(item);
-            }
-        }
-        write_archive(
-            output.as_ref(),
-            self.version,
-            &self.prefix,
-            pending,
-            Some(&self.path),
-            Some(&progress),
         )
     }
 
@@ -896,7 +749,8 @@ pub fn pack(directory: impl AsRef<Path>, output: impl AsRef<Path>, format: Forma
     pack_with_progress(directory, output, format, |_, _, _, _, _, _| {})
 }
 
-/// Pack a directory in parallel without compression.
+/// Pack a directory in parallel. Android DAT and OBB entries use game-compatible
+/// fixed-Huffman DFLT blocks when that reduces their stored size.
 /// Progress reports the phase, current path, completed files, cumulative bytes,
 /// total files, and total bytes. Callbacks may arrive out of order within a phase.
 pub fn pack_with_progress(
@@ -911,6 +765,15 @@ pub fn pack_with_progress(
     }
     let mut pending = Vec::new();
     collect_directory(root, root, &mut pending)?;
+    let mut paths = HashSet::new();
+    for item in &pending {
+        if !paths.insert(item.path.to_ascii_uppercase()) {
+            return Err(input(format!(
+                "duplicate case-insensitive input path: {}",
+                item.path
+            )));
+        }
+    }
     if let Ok(output_path) = fs::canonicalize(output.as_ref()) {
         for item in &pending {
             if let Source::Disk(source) = &item.source {
@@ -923,6 +786,104 @@ pub fn pack_with_progress(
             }
         }
     }
+    let total_files = pending.len();
+    let total_bytes = pending.iter().map(|item| item.size as u64).sum();
+    let files_completed = AtomicUsize::new(0);
+    let bytes_encoded = AtomicU64::new(0);
+    let output_parent = output
+        .as_ref()
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let staging = if format == Format::Pc {
+        None
+    } else {
+        Some(
+            tempfile::Builder::new()
+                .prefix(".nudat-")
+                .tempdir_in(output_parent)?,
+        )
+    };
+    pending
+        .par_iter_mut()
+        .enumerate()
+        .try_for_each(|(index, item)| -> Result<()> {
+            progress(
+                PackPhase::Encode,
+                &item.path,
+                files_completed.load(Ordering::Relaxed),
+                bytes_encoded.load(Ordering::Relaxed),
+                total_files,
+                total_bytes,
+            );
+            if let (Some(staging), Source::Disk(path)) = (&staging, &item.source) {
+                if item.size != 0 && dflt::should_compress(&item.path) {
+                    let mut source = File::open(path)?;
+                    if source.metadata()?.len() != item.size as u64 {
+                        return Err(input(format!(
+                            "input file changed while packing: {}",
+                            path.display()
+                        )));
+                    }
+                    let staged_path = staging.path().join(index.to_string());
+                    let mut staged = File::create(&staged_path)?;
+                    let mut buffer = [0u8; dflt::BLOCK_SIZE];
+                    let mut left = item.size as usize;
+                    let mut stored_size = 0u64;
+                    let mut since_report = 0usize;
+                    while left != 0 {
+                        let length = left.min(buffer.len());
+                        source.read_exact(&mut buffer[..length])?;
+                        let block = dflt::encode_block(&buffer[..length]);
+                        staged.write_all(b"DFLT")?;
+                        staged.write_all(&(block.len() as u32).to_le_bytes())?;
+                        staged.write_all(&(length as u32).to_le_bytes())?;
+                        staged.write_all(&block)?;
+                        stored_size += 12 + block.len() as u64;
+                        left -= length;
+                        bytes_encoded.fetch_add(length as u64, Ordering::Relaxed);
+                        since_report += length;
+                        if since_report >= 1024 * 1024 {
+                            progress(
+                                PackPhase::Encode,
+                                &item.path,
+                                files_completed.load(Ordering::Relaxed),
+                                bytes_encoded.load(Ordering::Relaxed),
+                                total_files,
+                                total_bytes,
+                            );
+                            since_report = 0;
+                        }
+                    }
+                    if source.metadata()?.len() != item.size as u64 {
+                        return Err(input(format!(
+                            "input file changed while packing: {}",
+                            path.display()
+                        )));
+                    }
+                    if stored_size < item.size as u64 {
+                        staged.flush()?;
+                        item.source = Source::Disk(staged_path);
+                        item.stored_size = stored_size as u32;
+                        item.compression = Compression::Deflate;
+                    }
+                } else {
+                    bytes_encoded.fetch_add(item.size as u64, Ordering::Relaxed);
+                }
+            } else {
+                bytes_encoded.fetch_add(item.size as u64, Ordering::Relaxed);
+            }
+            let completed = files_completed.fetch_add(1, Ordering::Relaxed) + 1;
+            progress(
+                PackPhase::Encode,
+                &item.path,
+                completed,
+                bytes_encoded.load(Ordering::Relaxed),
+                total_files,
+                total_bytes,
+            );
+            Ok(())
+        })?;
     let mut prefix = vec![0; format.prefix_len()];
     let marker = [
         b"BEGIN_APP_ID_STRING".as_slice(),
@@ -1057,15 +1018,21 @@ fn write_archive(
             return Err(input(format!("duplicate archive path: {}", item.path)));
         }
     }
+    for pair in pending.windows(2) {
+        if name_hash(&pair[0].path) == name_hash(&pair[1].path) {
+            return Err(input(format!(
+                "DAT path hash collision: {} and {}",
+                pair[0].path, pair[1].path
+            )));
+        }
+    }
     let tree = build_tree(&pending)?;
     let mut planned_index = prefix.len() as u64;
     for item in &pending {
         planned_index = align(planned_index) + item.stored_size as u64;
     }
     if planned_index > i32::MAX as u64 {
-        return Err(input(
-            "DAT index exceeds the game's 2 GiB loader limit; repack from the original archive to preserve compression",
-        ));
+        return Err(input("DAT index exceeds the game's 2 GiB loader limit"));
     }
     if let Ok(output_path) = fs::canonicalize(output) {
         for item in &pending {

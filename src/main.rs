@@ -83,9 +83,6 @@ enum Command {
         /// Archive format (defaults to OBB for .obb output, otherwise PC).
         #[arg(long, value_enum)]
         format: Option<OutputFormat>,
-        /// Preserve compressed files from an original archive when rebuilding.
-        #[arg(long, value_name = "ORIGINAL_ARCHIVE")]
-        base: Option<PathBuf>,
         /// Number of packing workers (defaults to Rayon's thread count).
         #[arg(long)]
         jobs: Option<usize>,
@@ -448,7 +445,6 @@ fn run() -> Result<()> {
             directory,
             output,
             format,
-            base,
             jobs,
         } => {
             if jobs == Some(0) {
@@ -465,30 +461,14 @@ fn run() -> Result<()> {
                     OutputFormat::Pc
                 }
             });
-            let original = base
-                .as_ref()
-                .map(Archive::open)
-                .transpose()
-                .with_context(|| {
-                    format!(
-                        "opening base archive {}",
-                        base.as_ref().unwrap_or(&output).display()
-                    )
-                })?;
-            if let Some(original) = &original {
-                if format.is_some() && original.format() != Some(inferred_format.into()) {
-                    bail!("--format does not match the base archive");
-                }
-                if output
-                    .extension()
-                    .and_then(|extension| extension.to_str())
-                    .is_some_and(|extension| extension.eq_ignore_ascii_case("obb"))
-                    && original.format() != Some(Format::Obb)
-                {
-                    bail!("an .obb output requires an OBB base archive");
-                }
-            }
-            let compare_progress = TransferProgress::new("compare", 0)?;
+            let encode_progress = TransferProgress::new(
+                if matches!(inferred_format, OutputFormat::Pc) {
+                    "scan"
+                } else {
+                    "compress"
+                },
+                0,
+            )?;
             let write_progress = TransferProgress::new("pack", 0)?;
             let update = |phase: PackPhase,
                           path: &str,
@@ -497,28 +477,22 @@ fn run() -> Result<()> {
                           total_files: usize,
                           total_bytes: u64| {
                 match phase {
-                    PackPhase::Compare => {
-                        compare_progress.report(path, completed, bytes, total_files, total_bytes)
+                    PackPhase::Encode => {
+                        encode_progress.report(path, completed, bytes, total_files, total_bytes)
                     }
                     PackPhase::Write => {
                         write_progress.report(path, completed, bytes, total_files, total_bytes)
                     }
                 }
             };
-            let run = || {
-                if let Some(original) = &original {
-                    original.repack_with_progress(&directory, &output, update)
-                } else {
-                    pack_with_progress(&directory, &output, inferred_format.into(), update)
-                }
-            };
+            let run = || pack_with_progress(&directory, &output, inferred_format.into(), update);
             let result = if let Some(jobs) = jobs {
                 let pool = ThreadPoolBuilder::new().num_threads(jobs).build()?;
                 pool.install(run)
             } else {
                 run()
             };
-            compare_progress.finish();
+            encode_progress.finish();
             write_progress.finish();
             result.with_context(|| format!("packing {}", directory.display()))?;
             writeln!(

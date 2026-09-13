@@ -350,6 +350,7 @@ dependencies = [
  "clap",
  "flate2",
  "indicatif",
+ "miniz_oxide",
  "rayon",
  "tempfile",
  "thiserror",

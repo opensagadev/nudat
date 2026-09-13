@@ -89,9 +89,9 @@ fn tree_and_cat_show_archive_contents() {
         .output()
         .unwrap();
     assert!(packed.status.success());
-    assert!(String::from_utf8(packed.stderr)
-        .unwrap()
-        .contains("pack: 100%"));
+    let progress = String::from_utf8(packed.stderr).unwrap();
+    assert!(progress.contains("compress: 100%"));
+    assert!(progress.contains("pack: 100%"));
     assert_eq!(packed.stdout, b"packed 3 files\n");
     let bytes = fs::read(&obb).unwrap();
     assert!(bytes[8..512]
@@ -102,14 +102,12 @@ fn tree_and_cat_show_archive_contents() {
     assert_eq!(obb_archive.read("root.bin").unwrap(), b"root");
 
     fs::write(input.join("root.bin"), b"changed").unwrap();
-    let rebuilt = temp.path().join("with_base.obb");
+    let rebuilt = temp.path().join("rebuilt_again.obb");
     let packed = Command::new(env!("CARGO_BIN_EXE_nudat"))
         .args([
             "pack",
             input.to_str().unwrap(),
             rebuilt.to_str().unwrap(),
-            "--base",
-            obb.to_str().unwrap(),
             "--jobs",
             "2",
         ])
@@ -117,7 +115,7 @@ fn tree_and_cat_show_archive_contents() {
         .unwrap();
     assert!(packed.status.success());
     let stderr = String::from_utf8(packed.stderr).unwrap();
-    assert!(stderr.contains("compare: 100%"));
+    assert!(stderr.contains("compress: 100%"));
     assert!(stderr.contains("pack: 100%"));
     assert_eq!(
         Archive::open(rebuilt).unwrap().read("root.bin").unwrap(),
