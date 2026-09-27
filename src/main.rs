@@ -23,6 +23,7 @@ struct Cli {
 #[derive(Clone, Copy, ValueEnum)]
 enum OutputFormat {
     Pc,
+    PcLegacy,
     Android,
     Obb,
 }
@@ -31,6 +32,7 @@ impl From<OutputFormat> for Format {
     fn from(value: OutputFormat) -> Self {
         match value {
             OutputFormat::Pc => Self::Pc,
+            OutputFormat::PcLegacy => Self::PcLegacy,
             OutputFormat::Android => Self::Android,
             OutputFormat::Obb => Self::Obb,
         }
@@ -209,7 +211,7 @@ impl<'a> TreeNode<'a> {
     fn add(&mut self, entry: &'a Entry) {
         let mut node = self;
         node.include(entry);
-        let mut parts = entry.path.split('\\').peekable();
+        let mut parts = entry.path.split('/').peekable();
         while let Some(part) = parts.next() {
             if parts.peek().is_some() {
                 node = &mut node

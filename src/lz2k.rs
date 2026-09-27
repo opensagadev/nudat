@@ -228,12 +228,26 @@ const HASH_SIZE: usize = 1 << HASH_BITS;
 /// The PC archives leave streamed files raw and use LZ2K for these assets.
 pub(crate) fn should_compress(path: &str) -> bool {
     let extension = path
-        .rsplit('\\')
+        .rsplit('/')
         .next()
         .and_then(|name| name.rsplit_once('.'))
         .map(|(_, extension)| extension);
     extension.is_some_and(|extension| {
         ["an3", "bsa", "dds", "fpk", "ghg", "gsc", "pak", "ter"]
+            .iter()
+            .any(|known| extension.eq_ignore_ascii_case(known))
+    })
+}
+
+/// MkDat V3.26 compresses a narrower set of assets than MkDat v4.0.
+pub(crate) fn should_compress_legacy(path: &str) -> bool {
+    let extension = path
+        .rsplit('/')
+        .next()
+        .and_then(|name| name.rsplit_once('.'))
+        .map(|(_, extension)| extension);
+    extension.is_some_and(|extension| {
+        ["fpk", "ghg", "gsc", "pak"]
             .iter()
             .any(|known| extension.eq_ignore_ascii_case(known))
     })

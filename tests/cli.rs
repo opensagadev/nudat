@@ -35,7 +35,7 @@ fn tree_and_cat_show_archive_contents() {
     assert!(list.status.success());
     assert_eq!(
         String::from_utf8(list.stdout).unwrap(),
-        "levels\\episode_i\\one.bin\nlevels\\episode_i\\two.bin\nroot.bin\n"
+        "levels/episode_i/one.bin\nlevels/episode_i/two.bin\nroot.bin\n"
     );
 
     let cat = Command::new(env!("CARGO_BIN_EXE_nudat"))
@@ -100,6 +100,23 @@ fn tree_and_cat_show_archive_contents() {
     let obb_archive = Archive::open(&obb).unwrap();
     assert_eq!(obb_archive.version(), -5);
     assert_eq!(obb_archive.read("root.bin").unwrap(), b"root");
+
+    let legacy = temp.path().join("legacy.DAT");
+    let packed = Command::new(env!("CARGO_BIN_EXE_nudat"))
+        .args([
+            "pack",
+            input.to_str().unwrap(),
+            legacy.to_str().unwrap(),
+            "--format",
+            "pc-legacy",
+        ])
+        .output()
+        .unwrap();
+    assert!(packed.status.success());
+    assert_eq!(
+        Archive::open(&legacy).unwrap().format(),
+        Some(Format::PcLegacy)
+    );
 
     fs::write(input.join("root.bin"), b"changed").unwrap();
     let rebuilt = temp.path().join("rebuilt_again.obb");

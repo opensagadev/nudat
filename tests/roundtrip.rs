@@ -12,7 +12,7 @@ fn tempdir() -> std::io::Result<TempDir> {
 
 #[test]
 fn pack_unpack_and_edit_all_wrappers() {
-    for format in [Format::Pc, Format::Android, Format::Obb] {
+    for format in [Format::Pc, Format::PcLegacy, Format::Android, Format::Obb] {
         let temp = tempdir().unwrap();
         let input = temp.path().join("input");
         fs::create_dir_all(input.join("Levels/Episode_I")).unwrap();
@@ -62,6 +62,71 @@ fn pack_unpack_and_edit_all_wrappers() {
         assert!(changed.entry("empty.bin").is_none());
         changed.verify().unwrap();
     }
+}
+
+#[test]
+fn legacy_pc_reads_unsorted_hashes_in_file_record_order() {
+    let temp = tempdir().unwrap();
+    let input = temp.path().join("input");
+    fs::create_dir_all(&input).unwrap();
+    fs::write(input.join("alpha.bin"), b"alpha payload").unwrap();
+    fs::write(input.join("beta.bin"), b"beta payload").unwrap();
+    let archive = temp.path().join("legacy.DAT");
+    pack(&input, &archive, Format::PcLegacy).unwrap();
+
+    let mut bytes = fs::read(&archive).unwrap();
+    let offset = i32::from_le_bytes(bytes[..4].try_into().unwrap());
+    assert!(offset < 0);
+    let index = (-offset as usize) * 256;
+    assert_eq!(
+        index + u32::from_le_bytes(bytes[4..8].try_into().unwrap()) as usize,
+        bytes.len()
+    );
+    assert_eq!(
+        i32::from_le_bytes(bytes[index..index + 4].try_into().unwrap()),
+        -2
+    );
+    let nodes_start = index + 8 + 2 * 16 + 4;
+    let node_count =
+        i32::from_le_bytes(bytes[nodes_start - 4..nodes_start].try_into().unwrap()) as usize;
+    let leaves = (1..node_count)
+        .map(|i| nodes_start + i * 8)
+        .filter(|&at| i16::from_le_bytes(bytes[at..at + 2].try_into().unwrap()) <= 0)
+        .collect::<Vec<_>>();
+    assert_eq!(leaves.len(), 2);
+    for at in leaves {
+        let child = i16::from_le_bytes(bytes[at..at + 2].try_into().unwrap());
+        bytes[at..at + 2].copy_from_slice(&(-1 - child).to_le_bytes());
+    }
+    let first_record = bytes[index + 8..index + 24].to_vec();
+    let second_record = bytes[index + 24..index + 40].to_vec();
+    bytes[index + 8..index + 24].copy_from_slice(&second_record);
+    bytes[index + 24..index + 40].copy_from_slice(&first_record);
+    let names_length_at = nodes_start + node_count * 8;
+    let names_len = i32::from_le_bytes(
+        bytes[names_length_at..names_length_at + 4]
+            .try_into()
+            .unwrap(),
+    ) as usize;
+    let hashes_at = names_length_at + 4 + names_len;
+    let first_hash = bytes[hashes_at..hashes_at + 4].to_vec();
+    let second_hash = bytes[hashes_at + 4..hashes_at + 8].to_vec();
+    bytes[hashes_at..hashes_at + 4].copy_from_slice(&second_hash);
+    bytes[hashes_at + 4..hashes_at + 8].copy_from_slice(&first_hash);
+    fs::write(&archive, bytes).unwrap();
+
+    let dat = Archive::open(&archive).unwrap();
+    assert_eq!(dat.format(), Some(Format::PcLegacy));
+    assert_eq!(dat.read("ALPHA.BIN").unwrap(), b"alpha payload");
+    assert_eq!(dat.read("beta.bin").unwrap(), b"beta payload");
+    dat.verify().unwrap();
+
+    let edited = temp.path().join("edited.DAT");
+    dat.rewrite(&edited, &[], &[]).unwrap();
+    let copy = Archive::open(&edited).unwrap();
+    assert_eq!(copy.version(), -2);
+    assert_eq!(copy.read("alpha.bin").unwrap(), b"alpha payload");
+    assert_eq!(copy.read("beta.bin").unwrap(), b"beta payload");
 }
 
 #[test]
@@ -401,7 +466,7 @@ fn mixed_case_paths_survive_pack_unpack_and_edit() {
         let dat = Archive::open(&archive).unwrap();
         assert_eq!(
             dat.entry("chars\\weirdo\\ALL_TEXTURES.FPK").unwrap().path,
-            "ChArS\\WeIrDo\\all_Textures.fpk"
+            "ChArS/WeIrDo/all_Textures.fpk"
         );
         assert_eq!(
             dat.read("CHARS/weirdo/all_textures.fpk").unwrap(),
@@ -421,7 +486,7 @@ fn mixed_case_paths_survive_pack_unpack_and_edit() {
         )
         .unwrap();
         let edited = Archive::open(&edited).unwrap();
-        assert_eq!(edited.entries()[0].path, "ChArS\\WeIrDo\\all_Textures.fpk");
+        assert_eq!(edited.entries()[0].path, "ChArS/WeIrDo/all_Textures.fpk");
         assert_eq!(
             edited.read("chars/weirdo/ALL_TEXTURES.FPK").unwrap(),
             b"updated"

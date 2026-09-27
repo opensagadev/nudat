@@ -6,7 +6,7 @@
 
 **Inspect, unpack, edit, and repack Traveller's Tales Nu engine archives.**
 
-PC `.DAT`, Android `.dat`, and Android `.obb` are supported.
+PC `.DAT` (including the older `MkDat V3.26` variant), Android `.dat`, and Android `.obb` are supported.
 
 ## Usage
 
@@ -34,6 +34,9 @@ nudat unpack GAME.DAT game/
 nudat pack game/ rebuilt.DAT
 nudat verify rebuilt.DAT
 
+nudat unpack HERO1.DAT hero/
+nudat pack hero/ rebuilt-hero.DAT --format pc-legacy
+
 nudat unpack main.1060.com.wb.lego.tcs.obb obb/
 nudat pack obb/ rebuilt.obb
 ```
@@ -50,7 +53,7 @@ nudat pack obb/ rebuilt.obb
 | `nudat edit ARCHIVE OUTPUT --put PATH=FILE [--remove PATH]` | Replace, add, or remove files. |
 | `nudat verify ARCHIVE` | Decode and check every entry. |
 
-`pack` selects OBB for a `.obb` output and PC otherwise; `FORMAT` is `pc`, `android`, or `obb`. Use `--format android` for Android `.dat`. `--jobs` defaults to Rayon's available worker count. Archive paths accept `/` or `\` and ignore ASCII letter case.
+`pack` selects OBB for a `.obb` output and modern PC otherwise; `FORMAT` is `pc`, `pc-legacy`, `android`, or `obb`. Use `--format pc-legacy` for older PC archives. Use `--format android` for Android `.dat`. `--jobs` defaults to Rayon's available worker count. Archive paths display with `/`, accept either separator as input, and ignore ASCII letter case.
 
 Run `nudat <command> --help` for every option.
 
@@ -66,6 +69,7 @@ The CLI runs packing and unpacking in parallel, reports progress on stderr, and 
 
 | Variant | Index version | Prefix | New payloads |
 | --- | ---: | --- | --- |
+| PC MkDat V3.26 | `-2` | 2,048 bytes; `MkDat V3.26` | Selective `LZ2K` |
 | PC MkDat | `-3` | 1,024 bytes; `MkDat v4.0` | Selective `LZ2K` |
 | Android PakDat | `-5` | 512 bytes; `PakDat (TechRound) v1.1` | Selective `DFLT` |
 | Android OBB | `-5` | 512 bytes; `PakDat v1.01` | Selective `DFLT` |
@@ -88,24 +92,25 @@ Android `.dat` has the same index, tree, and payload encoding, but identifies it
 ### Layout and index
 
 ```text
-0x00  u32 index offset
+0x00  i32 index offset (negative: offset in 256-byte sectors)
 0x04  u32 index length
 0x08  variant prefix
       file payloads, each starting at a 256-byte boundary
       index:
         i32 version, i32 file count
         file records[file count]       (16 bytes each)
-        i32 node count, nodes           (8 bytes for -3; 12 for -5)
+        i32 node count, nodes           (8 bytes for -2/-3; 12 for -5)
         i32 name-table length, names    (NUL-terminated)
-        u32 path hashes[file count]     (sorted)
+        u32 path hashes[file count]
         i32 extra-hash count, i32 extra-hash length, extra data
 ```
 
 - **File record:** four little-endian `i32` values: offset ÷ 256, stored size, decoded size, compression mode.
 - **Tree node:** `i16` child/sibling links and a `u32` name offset; `-5` adds two `u16` fields.
-- **Paths:** backslash separators, ASCII case-insensitive lookup, original spelling preserved. Case-only duplicates are rejected.
-- **Hash:** start at `0x811c9dc5`; for each ASCII-uppercase path byte, apply `(hash ^ byte) * 0x199933` modulo `2^32`. Records follow sorted hash order.
-- **PC `-3`:** tree leaf numbers are not file-record indexes; `nudat` matches names through the hashes.
+- **Paths:** the DAT index hashes backslash-separated paths; `nudat` displays `/` and accepts either separator. Lookup ignores ASCII case, preserves original spelling, and rejects case-only duplicates.
+- **Hash:** start at `0x811c9dc5`; for each ASCII-uppercase path byte, apply `(hash ^ byte) * 0x199933` modulo `2^32`.
+- **PC `-2`:** the header stores the negative index offset in 256-byte sectors. Hashes follow file-record order, and tree leaf numbers identify those records directly. They need not be sorted.
+- **PC `-3` / Android `-5`:** hashes are sorted. Tree leaf numbers are not file-record indexes; `nudat` matches names through the hashes.
 
 ### Payload encoding
 
@@ -116,12 +121,12 @@ Android `.dat` has the same index, tree, and payload encoding, but identifies it
 | `3` | `DFLT` chunks: magic, `u32 stored_size`, `u32 decoded_size`, then data. |
 
 - Equal stored and decoded chunk sizes mean verbatim bytes.
-- `LZ2K` uses Huffman-coded literals and lengths with back-references up to 8 KiB. PC packing compresses `.an3`, `.bsa`, `.dds`, `.fpk`, `.ghg`, `.gsc`, `.pak`, and `.ter` when beneficial.
+- `LZ2K` uses Huffman-coded literals and lengths with back-references up to 8 KiB. Modern PC packing compresses `.an3`, `.bsa`, `.dds`, `.fpk`, `.ghg`, `.gsc`, `.pak`, and `.ter` when beneficial; legacy PC packing uses `.fpk`, `.ghg`, `.gsc`, and `.pak`.
 - Nu `DFLT` swaps the standard DEFLATE dynamic and stored block tags; the fixed-Huffman tag is unchanged.
 - Android packing compresses these suffixes when beneficial: `.android_etc1_tex`, `.bsa`, `.cu2`, `.etc1`, `.fpk`, `.ghg`, `.gsc`, `.ios_pcode`, `.ios_vcode`, `.pak`, `.pvrnc`, `.ter`, `.tex`.
 - Text, scripts, audio, and other streamed files stay raw. Encoded files use 16 KiB decoded chunks; incompressible chunks stay verbatim. Compressed Android chunks use one final fixed-Huffman block.
 
-The game treats the index offset as signed, so `nudat` rejects output whose index starts at or above 2 GiB. File and tree references are signed 16-bit; individual sizes use signed 32-bit fields.
+Modern PC and Android use a positive signed index offset, limiting the index position to below 2 GiB. Legacy PC stores a negative sector offset instead. File and tree references are signed 16-bit; individual sizes use signed 32-bit fields.
 
 ## Development
 

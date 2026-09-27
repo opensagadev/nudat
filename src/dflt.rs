@@ -15,7 +15,7 @@ use miniz_oxide::deflate::core::{
 /// shrink, so they follow the same read paths in the game as the originals.
 pub(crate) fn should_compress(path: &str) -> bool {
     let extension = path
-        .rsplit('\\')
+        .rsplit('/')
         .next()
         .and_then(|name| name.rsplit_once('.'))
         .map(|(_, extension)| extension);

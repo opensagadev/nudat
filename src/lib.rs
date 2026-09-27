@@ -109,6 +109,7 @@ impl Compression {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Format {
     Pc,
+    PcLegacy,
     Android,
     Obb,
 }
@@ -117,12 +118,14 @@ impl Format {
     fn version(self) -> i32 {
         match self {
             Self::Pc => -3,
-            _ => -5,
+            Self::PcLegacy => -2,
+            Self::Android | Self::Obb => -5,
         }
     }
     fn marker(self) -> &'static [u8] {
         match self {
             Self::Pc => b"MkDat v4.0",
+            Self::PcLegacy => b"MkDat V3.26",
             Self::Android => b"PakDat (TechRound) v1.1",
             Self::Obb => b"PakDat v1.01",
         }
@@ -130,7 +133,8 @@ impl Format {
     fn prefix_len(self) -> usize {
         match self {
             Self::Pc => 1024,
-            _ => 512,
+            Self::PcLegacy => 2048,
+            Self::Android | Self::Obb => 512,
         }
     }
 }
@@ -296,13 +300,18 @@ impl Archive {
         if file_len < 16 {
             return Err(invalid("file is too short to be a DAT archive"));
         }
-        let index = file.read_le::<u32>()? as u64;
+        let raw_index = file.read_le::<i32>()?;
+        let index = if raw_index < 0 {
+            (-i64::from(raw_index) as u64) * ALIGN
+        } else {
+            raw_index as u64
+        };
         if index < 8 || index + 8 > file_len {
             return Err(invalid("DAT index offset is outside the file"));
         }
         file.seek(SeekFrom::Start(index))?;
         let version = file.read_le::<i32>()?;
-        if version != -3 && version != -5 {
+        if version != -2 && version != -3 && version != -5 {
             return Err(invalid(format!("unsupported DAT version {version}")));
         }
         let count = file.read_le::<i32>()?;
@@ -406,7 +415,7 @@ impl Archive {
                 let path = if parent.is_empty() {
                     name.clone()
                 } else {
-                    format!("{parent}\\{name}")
+                    format!("{parent}/{name}")
                 };
                 if child <= 0 {
                     let slot = paths
@@ -433,22 +442,30 @@ impl Archive {
         if paths.iter().any(Option::is_none) {
             return Err(invalid("DAT tree does not name every file"));
         }
-        // The tree's leaf indexes are not file-info indexes in MkDat -3.
-        // Both variants store file-info records in sorted path-hash order.
+        // MkDat -2 leaf indexes identify file records directly. Later variants
+        // store file records in sorted path-hash order instead.
         let hashes = hashes
             .as_chunks::<4>()
             .0
             .iter()
             .map(|bytes| u32::from_le_bytes(*bytes))
             .collect::<Vec<_>>();
-        if hashes.windows(2).any(|pair| pair[0] >= pair[1]) {
+        if version != -2 && hashes.windows(2).any(|pair| pair[0] >= pair[1]) {
             return Err(invalid("DAT hashes are unsorted or collide"));
         }
         let mut entries = vec![None; count];
-        for path in paths.into_iter().flatten() {
-            let position = hashes
-                .binary_search(&name_hash(&path))
-                .map_err(|_| invalid(format!("DAT hash missing for {path}")))?;
+        for (leaf, path) in paths.into_iter().enumerate() {
+            let path = path.unwrap();
+            let position = if version == -2 {
+                if hashes[leaf] != name_hash(&path) {
+                    return Err(invalid(format!("DAT hash mismatch for {path}")));
+                }
+                leaf
+            } else {
+                hashes
+                    .binary_search(&name_hash(&path))
+                    .map_err(|_| invalid(format!("DAT hash missing for {path}")))?
+            };
             let (offset, stored_size, size, compression) = infos[position];
             if entries[position]
                 .replace(Entry {
@@ -492,7 +509,7 @@ impl Archive {
     }
 
     pub fn format(&self) -> Option<Format> {
-        [Format::Pc, Format::Android, Format::Obb]
+        [Format::Pc, Format::PcLegacy, Format::Android, Format::Obb]
             .into_iter()
             .find(|format| {
                 self.prefix
@@ -562,7 +579,7 @@ impl Archive {
         let mut total_written = 0;
         for (index, entry) in self.entries.iter().enumerate() {
             progress(entry, index, total_written);
-            let path = root.join(entry.path.replace('\\', "/"));
+            let path = root.join(&entry.path);
             if let Some(parent) = path.parent() {
                 fs::create_dir_all(parent)?;
             }
@@ -593,7 +610,7 @@ impl Archive {
         let targets = self
             .entries
             .iter()
-            .map(|entry| (entry, root.join(entry.path.replace('\\', "/"))))
+            .map(|entry| (entry, root.join(&entry.path)))
             .collect::<Vec<_>>();
         let mut created_dirs = HashSet::new();
         for (_, path) in &targets {
@@ -723,12 +740,8 @@ fn collect_directory(root: &Path, dir: &Path, pending: &mut Vec<Pending>) -> Res
         if kind.is_dir() {
             collect_directory(root, &child.path(), pending)?;
         } else if kind.is_file() {
-            let relative = child
-                .path()
-                .strip_prefix(root)
-                .unwrap()
-                .to_string_lossy()
-                .replace('/', "\\");
+            let child_path = child.path();
+            let relative = child_path.strip_prefix(root).unwrap().to_string_lossy();
             let path = normalize(&relative)?;
             let size = child.metadata()?.len();
             if size > i32::MAX as u64 {
@@ -736,7 +749,7 @@ fn collect_directory(root: &Path, dir: &Path, pending: &mut Vec<Pending>) -> Res
             }
             pending.push(Pending {
                 path,
-                source: Source::Disk(child.path()),
+                source: Source::Disk(child_path),
                 size: size as u32,
                 stored_size: size as u32,
                 compression: Compression::None,
@@ -814,6 +827,7 @@ pub fn pack_with_progress(
             if let Source::Disk(path) = &item.source {
                 let compress = match format {
                     Format::Pc => lz2k::should_compress(&item.path),
+                    Format::PcLegacy => lz2k::should_compress_legacy(&item.path),
                     Format::Android | Format::Obb => dflt::should_compress(&item.path),
                 };
                 if item.size != 0 && compress {
@@ -836,10 +850,10 @@ pub fn pack_with_progress(
                         let length = left.min(buffer.len());
                         source.read_exact(&mut buffer[..length])?;
                         let block = match format {
-                            Format::Pc => lz2k::encode_block(&buffer[..length]),
+                            Format::Pc | Format::PcLegacy => lz2k::encode_block(&buffer[..length]),
                             Format::Android | Format::Obb => dflt::encode_block(&buffer[..length]),
                         };
-                        if format == Format::Pc {
+                        if matches!(format, Format::Pc | Format::PcLegacy) {
                             staged.write_all(b"LZ2K")?;
                             staged.write_all(&(length as u32).to_le_bytes())?;
                             staged.write_all(&(block.len() as u32).to_le_bytes())?;
@@ -875,7 +889,7 @@ pub fn pack_with_progress(
                         staged.flush()?;
                         item.source = Source::Disk(staged_path);
                         item.stored_size = stored_size as u32;
-                        item.compression = if format == Format::Pc {
+                        item.compression = if matches!(format, Format::Pc | Format::PcLegacy) {
                             Compression::Lz2k
                         } else {
                             Compression::Deflate
@@ -917,12 +931,12 @@ pub fn pack_with_progress(
 }
 
 fn normalize(path: &str) -> Result<String> {
-    let path = path.replace('/', "\\");
-    if path.is_empty() || path.starts_with('\\') || path.contains(':') || path.contains('\0') {
+    let path = path.replace('\\', "/");
+    if path.is_empty() || path.starts_with('/') || path.contains(':') || path.contains('\0') {
         return Err(input("invalid archive path"));
     }
     if path
-        .split('\\')
+        .split('/')
         .any(|part| part.is_empty() || part == "." || part == "..")
     {
         return Err(input("invalid archive path component"));
@@ -932,6 +946,7 @@ fn normalize(path: &str) -> Result<String> {
 
 fn name_hash(path: &str) -> u32 {
     path.bytes().fold(0x811c9dc5u32, |hash, b| {
+        let b = if b == b'/' { b'\\' } else { b };
         (hash ^ u32::from(b.to_ascii_uppercase())).wrapping_mul(0x199933)
     })
 }
@@ -1020,6 +1035,21 @@ fn write_archive(
     if pending.len() > i16::MAX as usize {
         return Err(input("too many DAT files"));
     }
+    let index_limit = if version == -2 {
+        i32::MAX as u64 * ALIGN
+    } else {
+        i32::MAX as u64
+    };
+    let check_index = |offset| -> Result<()> {
+        if offset > index_limit {
+            return Err(input(if version == -2 {
+                "DAT index exceeds legacy sector offset limit"
+            } else {
+                "DAT index exceeds the game's 2 GiB loader limit"
+            }));
+        }
+        Ok(())
+    };
     pending.sort_by(|a, b| {
         name_hash(&a.path)
             .cmp(&name_hash(&b.path))
@@ -1045,9 +1075,11 @@ fn write_archive(
     for item in &pending {
         planned_index = align(planned_index) + item.stored_size as u64;
     }
-    if planned_index > i32::MAX as u64 {
-        return Err(input("DAT index exceeds the game's 2 GiB loader limit"));
-    }
+    check_index(if version == -2 {
+        align(planned_index)
+    } else {
+        planned_index
+    })?;
     if let Ok(output_path) = fs::canonicalize(output) {
         for item in &pending {
             if let Source::Disk(source) = &item.source {
@@ -1085,9 +1117,11 @@ fn write_archive(
             ));
             position += item.stored_size as u64;
         }
-        if position > i32::MAX as u64 {
-            return Err(input("DAT index exceeds the game's 2 GiB loader limit"));
-        }
+        check_index(if version == -2 {
+            align(position)
+        } else {
+            position
+        })?;
         out.set_len(position)?;
         pending.par_iter().zip(offsets.par_iter()).try_for_each(
             |(item, &offset)| -> Result<()> {
@@ -1183,10 +1217,14 @@ fn write_archive(
             ));
         }
     }
-    let index = out.stream_position()?;
-    if index > i32::MAX as u64 {
-        return Err(input("DAT index exceeds the game's 2 GiB loader limit"));
+    let mut index = out.stream_position()?;
+    if version == -2 {
+        let aligned = align(index);
+        check_index(aligned)?;
+        out.write_all(&vec![0; (aligned - index) as usize])?;
+        index = aligned;
     }
+    check_index(index)?;
     out.write_le(&version)?;
     out.write_le(&(pending.len() as i32))?;
     for (offset, stored, size, mode) in infos {
@@ -1227,7 +1265,12 @@ fn write_archive(
         return Err(input("DAT index exceeds 32-bit length limit"));
     }
     out.seek(SeekFrom::Start(0))?;
-    out.write_le(&(index as u32))?;
+    let header_offset = if version == -2 {
+        -((index / ALIGN) as i32)
+    } else {
+        index as i32
+    };
+    out.write_le(&header_offset)?;
     out.write_le(&((end - index) as u32))?;
     Ok(out.flush()?)
 }
@@ -1235,7 +1278,7 @@ fn write_archive(
 fn build_tree(pending: &[Pending]) -> Result<EncodedTree> {
     let mut root = Node::default();
     for (i, item) in pending.iter().enumerate() {
-        let parts = item.path.split('\\').collect::<Vec<_>>();
+        let parts = item.path.split('/').collect::<Vec<_>>();
         let mut at = &mut root;
         for (j, part) in parts.iter().enumerate() {
             at = at
