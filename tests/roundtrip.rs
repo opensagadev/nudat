@@ -494,15 +494,28 @@ fn mixed_case_paths_survive_pack_unpack_and_edit() {
     }
 }
 
-#[cfg(unix)]
 #[test]
-fn pack_rejects_case_insensitive_duplicate_filenames() {
+fn pack_handles_case_insensitive_filenames() {
     let temp = tempdir().unwrap();
     let input = temp.path().join("input");
     fs::create_dir_all(&input).unwrap();
     fs::write(input.join("FOO.txt"), b"one").unwrap();
     fs::write(input.join("foo.TXT"), b"two").unwrap();
     let output = temp.path().join("duplicate.obb");
+    // Case sensitivity belongs to the filesystem, not the operating system.
+    // On case-insensitive volumes the second write replaces the first file.
+    let files = fs::read_dir(&input)
+        .unwrap()
+        .collect::<std::io::Result<Vec<_>>>()
+        .unwrap();
+    if files.len() == 1 {
+        pack(&input, &output, Format::Obb).unwrap();
+        let archive = Archive::open(&output).unwrap();
+        assert_eq!(archive.entries().len(), 1);
+        assert_eq!(archive.read("foo.txt").unwrap(), b"two");
+        return;
+    }
+    assert_eq!(files.len(), 2);
     let error = pack(&input, &output, Format::Obb).unwrap_err();
     assert!(error
         .to_string()
