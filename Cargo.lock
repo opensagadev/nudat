@@ -345,15 +345,24 @@ dependencies = [
 name = "nudat"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "binrw",
- "clap",
  "flate2",
- "indicatif",
  "miniz_oxide",
  "rayon",
  "tempfile",
  "thiserror",
+]
+
+[[package]]
+name = "nudat-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "indicatif",
+ "nudat",
+ "rayon",
+ "tempfile",
 ]
 
 [[package]]

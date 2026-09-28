@@ -1,0 +1,93 @@
+name: CLI release
+
+on:
+  push:
+    tags: ['nudat-cli-v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cli-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: macos-15
+            target: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Validate tag against CLI version
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: python scripts/package-release.py --check-tag
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Test workspace
+        run: cargo test --locked --workspace --target ${{ matrix.target }}
+      - name: Build CLI
+        run: cargo build --locked --release -p nudat-cli --target ${{ matrix.target }}
+      - name: Package and smoke test
+        run: python scripts/package-release.py --target ${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nudat-cli-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Create draft release
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/nudat-cli-v')
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: nudat-cli-*
+          path: dist
+          merge-multiple: true
+      - name: Verify checksums and upload release assets
+        working-directory: dist
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat *.sha256 > SHA256SUMS
+          sha256sum --check SHA256SUMS
+          if gh release view "$RELEASE_TAG" --json isDraft > release.json; then
+            test "$(jq -r .isDraft release.json)" = true || {
+              echo 'Refusing to replace assets on a published release.' >&2
+              exit 1
+            }
+          else
+            version="${RELEASE_TAG#nudat-cli-v}"
+            flags=()
+            if [[ "$version" == *-* ]]; then flags+=(--prerelease); fi
+            gh release create "$RELEASE_TAG" --verify-tag --draft \
+              --title "nudat CLI $version" --generate-notes "${flags[@]}"
+          fi
+          gh release upload "$RELEASE_TAG" ./*.zip ./*.tar.gz SHA256SUMS --clobber
