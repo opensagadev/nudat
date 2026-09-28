@@ -1,3 +1,8 @@
+[workspace]
+members = ["cli"]
+default-members = [".", "cli"]
+resolver = "2"
+
 [package]
 name = "nudat"
 version = "0.1.0"
@@ -9,13 +14,18 @@ readme = "README.md"
 keywords = ["archive", "dat", "obb", "modding"]
 categories = ["command-line-utilities", "encoding", "games"]
 
+[features]
+default = ["native"]
+native = ["dep:rayon", "dep:tempfile", "dep:miniz_oxide"]
+
 [dependencies]
-anyhow = "1"
 binrw = "0.15"
-clap = { version = "4", features = ["derive"] }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
-indicatif = "0.18"
-miniz_oxide = "0.9"
-rayon = "1"
-tempfile = "3"
+miniz_oxide = { version = "0.9", optional = true }
+rayon = { version = "1", optional = true }
+tempfile = { version = "3", optional = true }
 thiserror = "2"
+
+[[test]]
+name = "roundtrip"
+required-features = ["native"]
