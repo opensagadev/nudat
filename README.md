@@ -101,10 +101,8 @@ to build the index. Folder selection can filter entries by their `/`-separated
 path prefix.
 
 The portable library builds for `wasm32-unknown-unknown`. The `web/` crate wraps
-it for browser range reads and parallel chunk decoding. The plain-JavaScript
-unpacker in `demo/` uses that wrapper without loading whole archives into memory.
-Its page shell is rendered from the Saga website's shared styles and components;
-see [the web unpacker guide](demo/README.md) for build and test instructions.
+it for browser range reads and parallel chunk decoding. The browser unpacker
+page and its JavaScript live in the [Saga website repository](https://github.com/opensagadev/saga/tree/main/scripts/unpack).
 
 ```sh
 rustup target add wasm32-unknown-unknown

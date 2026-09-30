@@ -119,7 +119,7 @@ impl BrowserArchive {
             .ok_or_else(|| JsValue::from_str("File not found"))?;
         if entry.size > 256 * 1024 * 1024 {
             return Err(JsValue::from_str(
-                "This demo supports entries up to 256 MiB. Use the CLI for this file.",
+                "This operation supports entries up to 256 MiB. Use chunked extraction for this file.",
             ));
         }
         let mut output = DecodedBuffer(Vec::with_capacity(entry.size as usize));
