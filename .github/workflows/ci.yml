@@ -38,3 +38,31 @@ jobs:
         run: cargo test --locked -p nudat --no-default-features
       - name: Build portable library for WebAssembly
         run: cargo build --locked -p nudat --no-default-features --target wasm32-unknown-unknown
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: demo/package-lock.json
+      - name: Build WebAssembly
+        run: cargo build --locked -p nudat-web --release --target wasm32-unknown-unknown
+      - name: Install wasm-bindgen CLI
+        run: cargo install wasm-bindgen-cli --version 0.2.129 --locked
+      - name: Generate browser module
+        run: wasm-bindgen --target web --out-dir demo/pkg target/wasm32-unknown-unknown/release/nudat_web.wasm
+      - uses: actions/checkout@v6
+        with:
+          repository: opensagadev/saga
+          path: saga
+      - name: Prepare shared site shell
+        run: node demo/prepare.mjs saga
+      - name: Test browser runtime
+        run: |
+          npm --prefix demo ci
+          npm --prefix demo test

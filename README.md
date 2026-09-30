@@ -100,11 +100,11 @@ Indexing reads metadata, leaving payloads in the source. `entries()` lists files
 to build the index. Folder selection can filter entries by their `/`-separated
 path prefix.
 
-The portable library builds for `wasm32-unknown-unknown`. It is not yet a JavaScript
-package: a browser integration still needs a WebAssembly binding and browser file
-I/O. `Cursor` requires the bytes in memory; asynchronous range reads for large
-browser files need an adapter or additional API work. Website UI and styling can
-stay in the consuming website repository.
+The portable library builds for `wasm32-unknown-unknown`. The `web/` crate wraps
+it for browser range reads and parallel chunk decoding. The plain-JavaScript
+unpacker in `demo/` uses that wrapper without loading whole archives into memory.
+Its page shell is rendered from the Saga website's shared styles and components;
+see [the web unpacker guide](demo/README.md) for build and test instructions.
 
 ```sh
 rustup target add wasm32-unknown-unknown

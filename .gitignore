@@ -1,5 +1,12 @@
 /target/
 /dist/
+/demo/pkg/
+/demo/vendor/
+/demo/node_modules/
+/demo/branding/
+/demo/index.html
+/demo/sample.dat
+/demo/zip-check.zip
 /.cargo-home/
 /obb/
 /game.dat/

@@ -15,7 +15,7 @@ pub use native::{pack, pack_with_progress, Archive, PackPhase};
 
 use binrw::{BinRead, BinReaderExt, BinWrite};
 use flate2::read::DeflateDecoder;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Read, Seek, SeekFrom, Write};
 
 const ALIGN: u64 = 256;
@@ -163,6 +163,7 @@ pub struct ArchiveIndex {
     version: i32,
     prefix: Vec<u8>,
     entries: Vec<Entry>,
+    lookup: HashMap<String, usize>,
 }
 
 impl ArchiveIndex {
@@ -358,6 +359,12 @@ impl ArchiveIndex {
             return Err(invalid("DAT hash table does not name every entry"));
         }
         let entries = entries.into_iter().map(Option::unwrap).collect::<Vec<_>>();
+        let mut lookup = HashMap::with_capacity(entries.len());
+        for (index, entry) in entries.iter().enumerate() {
+            lookup
+                .entry(entry.path.to_ascii_uppercase())
+                .or_insert(index);
+        }
         let prefix_len = entries
             .iter()
             .map(|e| e.offset)
@@ -374,6 +381,7 @@ impl ArchiveIndex {
             version,
             prefix,
             entries,
+            lookup,
         })
     }
 
@@ -394,10 +402,8 @@ impl ArchiveIndex {
         &self.entries
     }
     pub fn entry(&self, path: &str) -> Option<&Entry> {
-        let key = normalize(path).ok()?;
-        self.entries
-            .iter()
-            .find(|e| e.path.eq_ignore_ascii_case(&key))
+        let key = normalize(path).ok()?.to_ascii_uppercase();
+        self.lookup.get(&key).map(|&index| &self.entries[index])
     }
 
     /// Decode one entry into memory. Use `copy_to` for entries larger than 512 MiB.
@@ -463,6 +469,133 @@ fn name_hash(path: &str) -> u32 {
     })
 }
 
+/// An independently decodable range, suitable for parallel scheduling.
+#[derive(Clone, Debug)]
+pub struct DecodeChunk {
+    pub offset: u64,
+    pub stored_size: u32,
+    pub size: u32,
+    pub output_offset: u64,
+    pub compression: Compression,
+}
+
+impl DecodeChunk {
+    /// Decode this range into a writer. Position its output at `output_offset`.
+    pub fn copy_to(&self, source: &mut (impl Read + Seek), output: &mut impl Write) -> Result<u64> {
+        source.seek(SeekFrom::Start(self.offset))?;
+        decode_entry_to(
+            source,
+            &Entry {
+                path: String::new(),
+                offset: self.offset,
+                stored_size: self.stored_size,
+                size: self.size,
+                compression: self.compression,
+            },
+            output,
+        )
+    }
+}
+
+impl ArchiveIndex {
+    /// Scan headers without decoding payloads. Each returned range is at most
+    /// `limit` decoded bytes; a compressed block exceeding that limit is rejected.
+    /// LZ2K/DFLT blocks are independent; raw entries may split at any byte.
+    pub fn chunks(
+        &self,
+        source: &mut (impl Read + Seek),
+        path: &str,
+        limit: u32,
+    ) -> Result<Vec<DecodeChunk>> {
+        if limit == 0 {
+            return Err(input("chunk limit must be positive"));
+        }
+        let entry = self
+            .entry(path)
+            .ok_or_else(|| NudatError::MissingEntry(path.to_owned()))?;
+        let mut chunks: Vec<DecodeChunk> = Vec::new();
+        let mut offset = entry.offset;
+        let end = offset + u64::from(entry.stored_size);
+        let mut output_offset = 0u64;
+        if entry.compression == Compression::None && entry.size != entry.stored_size {
+            return Err(invalid("uncompressed size mismatch"));
+        }
+        while offset < end {
+            let (size, stored_size) = if entry.compression == Compression::None {
+                let size = (end - offset).min(u64::from(limit)) as u32;
+                (size, size)
+            } else {
+                if end - offset < 12 {
+                    return Err(invalid("truncated compressed block header"));
+                }
+                source.seek(SeekFrom::Start(offset))?;
+                let mut header = [0; 12];
+                source.read_exact(&mut header)?;
+                let (size, compressed) = block_sizes(&header, entry.compression)?;
+                if u64::from(compressed) > end - offset - 12 {
+                    return Err(invalid("compressed block exceeds entry"));
+                }
+                if compressed == 0 && size != 0 {
+                    return Err(invalid("empty compressed block"));
+                }
+                (size, compressed + 12)
+            };
+            if size > limit {
+                return Err(input("compressed block exceeds chunk limit"));
+            }
+            if u64::from(stored_size) > u64::from(limit) + 12 {
+                return Err(input("compressed input exceeds chunk limit"));
+            }
+            if output_offset + u64::from(size) > u64::from(entry.size) {
+                return Err(invalid("decoded entry exceeds declared size"));
+            }
+            // Bound compressed input as well as decoded output. Headers of empty
+            // blocks count too, so corrupt files cannot create an unbounded job.
+            let merge = chunks.last_mut().filter(|chunk| {
+                u64::from(chunk.size) + u64::from(size) <= u64::from(limit)
+                    && u64::from(chunk.stored_size) + u64::from(stored_size) <= u64::from(limit)
+            });
+            if let Some(chunk) = merge {
+                chunk.size += size;
+                chunk.stored_size += stored_size;
+            } else {
+                chunks.push(DecodeChunk {
+                    offset,
+                    stored_size,
+                    size,
+                    output_offset,
+                    compression: entry.compression,
+                });
+            }
+            offset += u64::from(stored_size);
+            output_offset += u64::from(size);
+        }
+        if output_offset != u64::from(entry.size) {
+            return Err(invalid("decoded entry size mismatch"));
+        }
+        if chunks.is_empty() {
+            chunks.push(DecodeChunk {
+                offset,
+                stored_size: 0,
+                size: 0,
+                output_offset: 0,
+                compression: entry.compression,
+            });
+        }
+        Ok(chunks)
+    }
+}
+
+fn block_sizes(header: &[u8; 12], compression: Compression) -> Result<(u32, u32)> {
+    let first = u32::from_le_bytes(header[4..8].try_into().unwrap());
+    let second = u32::from_le_bytes(header[8..12].try_into().unwrap());
+    match compression {
+        Compression::Lz2k if &header[..4] == b"LZ2K" => Ok((first, second)),
+        Compression::Deflate if &header[..4] == b"DFLT" => Ok((second, first)),
+        _ => Err(invalid("invalid compressed block magic")),
+    }
+}
+
 fn decode_entry_to(file: &mut impl Read, entry: &Entry, output: &mut impl Write) -> Result<u64> {
     let mut written = 0u64;
     match entry.compression {
@@ -474,6 +607,8 @@ fn decode_entry_to(file: &mut impl Read, entry: &Entry, output: &mut impl Write)
         }
         Compression::Lz2k | Compression::Deflate => {
             let mut remaining = entry.stored_size as u64;
+            let mut bytes = Vec::new();
+            let mut decoded_buffer = Vec::new();
             while remaining > 0 {
                 if remaining < 12 {
                     return Err(invalid("truncated compressed block header"));
@@ -481,20 +616,8 @@ fn decode_entry_to(file: &mut impl Read, entry: &Entry, output: &mut impl Write)
                 let mut header = [0; 12];
                 file.read_exact(&mut header)?;
                 remaining -= 12;
-                let first = u32::from_le_bytes(header[4..8].try_into().unwrap()) as usize;
-                let second = u32::from_le_bytes(header[8..12].try_into().unwrap()) as usize;
-                let (decoded, compressed) = if entry.compression == Compression::Lz2k {
-                    if &header[..4] != b"LZ2K" {
-                        return Err(invalid("invalid LZ2K block magic"));
-                    }
-                    (first, second)
-                } else {
-                    if &header[..4] != b"DFLT" {
-                        return Err(invalid("invalid DFLT block magic"));
-                    }
-                    // DFLT stores compressed size before decoded size.
-                    (second, first)
-                };
+                let (decoded, compressed) = block_sizes(&header, entry.compression)?;
+                let (decoded, compressed) = (decoded as usize, compressed as usize);
                 if compressed as u64 > remaining {
                     return Err(invalid("compressed block exceeds entry"));
                 }
@@ -504,13 +627,15 @@ fn decode_entry_to(file: &mut impl Read, entry: &Entry, output: &mut impl Write)
                 if written + decoded as u64 > entry.size as u64 {
                     return Err(invalid("decoded entry exceeds declared size"));
                 }
-                let mut bytes = vec![0; compressed];
+                bytes.resize(compressed, 0);
                 file.read_exact(&mut bytes)?;
                 remaining -= compressed as u64;
                 let block = if compressed == decoded {
-                    bytes
+                    bytes.as_slice()
                 } else if entry.compression == Compression::Lz2k {
-                    lz2k::decode(&bytes, decoded).map_err(|e| invalid(e.to_string()))?
+                    lz2k::decode(&bytes, decoded, &mut decoded_buffer)
+                        .map_err(|e| invalid(e.to_string()))?;
+                    decoded_buffer.as_slice()
                 } else {
                     // Nu's DFLT stream swaps the DEFLATE dynamic and stored
                     // block type tags. Game files use one final dynamic block.
@@ -518,14 +643,17 @@ fn decode_entry_to(file: &mut impl Read, entry: &Entry, output: &mut impl Write)
                         bytes[0] |= 0b100;
                     }
                     let decoder = DeflateDecoder::new(bytes.as_slice());
-                    let mut out = Vec::with_capacity(decoded);
-                    decoder.take(decoded as u64 + 1).read_to_end(&mut out)?;
-                    out
+                    decoded_buffer.clear();
+                    decoded_buffer.reserve(decoded);
+                    decoder
+                        .take(decoded as u64 + 1)
+                        .read_to_end(&mut decoded_buffer)?;
+                    decoded_buffer.as_slice()
                 };
                 if block.len() != decoded {
                     return Err(invalid("compressed block decoded size mismatch"));
                 }
-                output.write_all(&block)?;
+                output.write_all(block)?;
                 written += block.len() as u64;
             }
         }
