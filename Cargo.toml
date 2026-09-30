@@ -1,5 +1,5 @@
 [workspace]
-members = ["cli"]
+members = ["cli", "web"]
 default-members = [".", "cli"]
 resolver = "2"
 
@@ -28,4 +28,9 @@ thiserror = "2"
 
 [[test]]
 name = "roundtrip"
+required-features = ["native"]
+
+[[bench]]
+name = "decoder"
+harness = false
 required-features = ["native"]

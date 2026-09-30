@@ -10,40 +10,55 @@ struct Bits<'a> {
 }
 
 impl<'a> Bits<'a> {
+    #[inline(always)]
     fn get(&mut self, count: usize) -> io::Result<u32> {
-        if count > 24 {
-            return Err(invalid("invalid LZ2K bit count"));
-        }
-        let mut value = 0;
-        for _ in 0..count {
-            let byte = *self
-                .data
-                .get(self.pos / 8)
-                .ok_or_else(|| invalid("truncated LZ2K block"))?;
-            value = (value << 1) | u32::from((byte >> (7 - self.pos % 8)) & 1);
-            self.pos += 1;
-        }
+        let value = self.peek(count)?;
+        self.pos += count;
         Ok(value)
     }
 
+    #[inline(always)]
     fn peek(&self, count: usize) -> io::Result<u32> {
-        let mut copy = Self {
-            data: self.data,
-            pos: self.pos,
+        if count > 24 {
+            return Err(invalid("invalid LZ2K bit count"));
+        }
+        if count == 0 {
+            return Ok(0);
+        }
+        if count > self.data.len().saturating_mul(8).saturating_sub(self.pos) {
+            return Err(invalid("truncated LZ2K block"));
+        }
+        let remaining = &self.data[self.pos / 8..];
+        let word = if remaining.len() >= 4 {
+            u32::from_be_bytes(remaining[..4].try_into().unwrap())
+        } else {
+            let mut bytes = [0; 4];
+            bytes[..remaining.len()].copy_from_slice(remaining);
+            u32::from_be_bytes(bytes)
         };
-        copy.get(count)
+        Ok((word >> (32 - count - self.pos % 8)) & ((1 << count) - 1))
     }
 }
 
 struct Huffman {
-    symbols: [Vec<Option<u16>>; 17],
+    symbols: Vec<u16>,
+    first: [u32; 17],
+    counts: [u32; 17],
+    starts: [usize; 17],
+    fast: Vec<u32>,
+    table_bits: usize,
     constant: Option<u16>,
 }
 
 impl Huffman {
     fn constant(value: u16) -> Self {
         Self {
-            symbols: std::array::from_fn(|_| Vec::new()),
+            symbols: Vec::new(),
+            first: [0; 17],
+            counts: [0; 17],
+            starts: [0; 17],
+            fast: Vec::new(),
+            table_bits: 0,
             constant: Some(value),
         }
     }
@@ -69,33 +84,66 @@ impl Huffman {
         if code + counts[16] != 1 << 16 {
             return Err(invalid("incomplete LZ2K tree"));
         }
-        let mut symbols: [Vec<Option<u16>>; 17] = std::array::from_fn(|_| Vec::new());
+        let first = next;
+        let mut starts = [0; 17];
+        let mut total = 0;
+        for len in 1..=16 {
+            starts[len] = total;
+            total += counts[len] as usize;
+        }
+        let mut symbols = vec![0; total];
+        let table_bits = usize::from(*lengths.iter().max().unwrap_or(&0)).min(12);
+        let mut fast = vec![0; 1 << table_bits];
         for (symbol, &len) in lengths.iter().enumerate() {
             if len != 0 {
                 let c = next[len as usize];
-                let row = &mut symbols[len as usize];
-                if row.len() <= c as usize {
-                    row.resize(c as usize + 1, None);
+                let index = starts[len as usize] + (c - first[len as usize]) as usize;
+                symbols[index] = symbol as u16;
+                if len as usize <= table_bits {
+                    let start = (c as usize) << (table_bits - len as usize);
+                    let end = start + (1 << (table_bits - len as usize));
+                    fast[start..end].fill((u32::from(len) << 16) | symbol as u32);
                 }
-                row[c as usize] = Some(symbol as u16);
                 next[len as usize] += 1;
             }
         }
         Ok(Self {
             symbols,
+            first,
+            counts,
+            starts,
+            fast,
+            table_bits,
             constant: None,
         })
     }
 
+    #[inline(always)]
     fn decode(&self, bits: &mut Bits<'_>) -> io::Result<u16> {
         if let Some(value) = self.constant {
             return Ok(value);
         }
-        let mut code = 0u16;
-        for len in 1..=16 {
-            code = (code << 1) | bits.get(1)? as u16;
-            if let Some(Some(symbol)) = self.symbols[len as usize].get(code as usize) {
-                return Ok(*symbol);
+        // Near the end of a block, a short code may still be valid without
+        // a full table prefix. Use the exact-length path there and for long codes.
+        let mut minimum = 1;
+        if let Ok(prefix) = bits.peek(self.table_bits) {
+            let packed = self.fast[prefix as usize];
+            if packed != 0 {
+                bits.pos += (packed >> 16) as usize;
+                return Ok(packed as u16);
+            }
+            minimum = self.table_bits + 1;
+        }
+        // Read the remaining prefix once, rather than reloading a word for
+        // every individual bit of a long Huffman code.
+        let available = (bits.data.len() * 8 - bits.pos).min(16);
+        let prefix = bits.peek(available)?;
+        for len in minimum..=available {
+            let code = prefix >> (available - len);
+            let index = code.wrapping_sub(self.first[len]);
+            if index < self.counts[len] {
+                bits.pos += len;
+                return Ok(self.symbols[self.starts[len] + index as usize]);
             }
         }
         Err(invalid("invalid LZ2K Huffman code"))
@@ -179,9 +227,10 @@ fn read_literal_lengths(bits: &mut Bits<'_>, code_lengths: &Huffman) -> io::Resu
     Huffman::new(&lengths)
 }
 
-pub(crate) fn decode(data: &[u8], output_len: usize) -> io::Result<Vec<u8>> {
+pub(crate) fn decode(data: &[u8], output_len: usize, output: &mut Vec<u8>) -> io::Result<()> {
     let mut bits = Bits { data, pos: 0 };
-    let mut output = Vec::with_capacity(output_len);
+    output.clear();
+    output.reserve(output_len);
     let mut block_left = 0;
     let mut literals = Huffman::constant(0);
     let mut offsets = Huffman::constant(0);
@@ -211,16 +260,115 @@ pub(crate) fn decode(data: &[u8], output_len: usize) -> io::Result<Vec<u8>> {
             if distance > output.len() || count > output_len - output.len() {
                 return Err(invalid("invalid LZ2K back-reference"));
             }
-            for _ in 0..count {
-                let byte = output[output.len() - distance];
-                output.push(byte);
+            let start = output.len() - distance;
+            let mut remaining = count;
+            while remaining > 0 {
+                // Newly copied bytes can supply the next part of an overlapping
+                // match; doubling preserves LZ semantics without bytewise pushes.
+                let length = remaining.min(output.len() - start);
+                output.extend_from_within(start..start + length);
+                remaining -= length;
             }
         }
     }
-    Ok(output)
+    Ok(())
 }
 
 #[cfg(feature = "native")]
+#[path = "lz2k/encode.rs"]
 mod encode;
 #[cfg(feature = "native")]
 pub(crate) use encode::{encode_block, should_compress, should_compress_legacy};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bit_windows_match_bitwise_reads_at_every_alignment_and_tail() {
+        let data = [0xa7, 0x36, 0xf0, 0x19, 0x82, 0xff, 0x01];
+        for pos in 0..=data.len() * 8 {
+            for count in 0..=24 {
+                let mut bits = Bits { data: &data, pos };
+                if pos + count > data.len() * 8 {
+                    assert!(bits.get(count).is_err());
+                } else {
+                    let expected = (pos..pos + count).fold(0u32, |n, at| {
+                        (n << 1) | u32::from((data[at / 8] >> (7 - at % 8)) & 1)
+                    });
+                    assert_eq!(bits.peek(count).unwrap(), expected);
+                    assert_eq!(bits.pos, pos);
+                    assert_eq!(bits.get(count).unwrap(), expected);
+                    assert_eq!(bits.pos, pos + count);
+                }
+            }
+        }
+        assert!(Bits {
+            data: &data,
+            pos: 0
+        }
+        .get(25)
+        .is_err());
+    }
+
+    #[test]
+    fn huffman_lookup_matches_slow_path_including_long_codes_and_tails() {
+        let lengths: Vec<u8> = (1..=16).chain([16]).collect();
+        let tree = Huffman::new(&lengths).unwrap();
+        for prefix in 0..=u16::MAX {
+            let data = prefix.to_be_bytes();
+            for pos in [0, 5, 12, 15] {
+                let mut fast = Bits { data: &data, pos };
+                let mut slow = Bits { data: &data, pos };
+                let expected = (|| -> io::Result<u16> {
+                    for len in 1..=16 {
+                        // This tree has codes 0, 10, 110, ... through sixteen
+                        // ones. Keep this reference independent of table layout.
+                        if slow.get(1)? == 0 {
+                            return Ok(len - 1);
+                        }
+                    }
+                    Ok(16)
+                })();
+                let actual = tree.decode(&mut fast);
+                assert_eq!(actual.as_ref().ok(), expected.as_ref().ok());
+                if actual.is_ok() {
+                    assert_eq!(fast.pos, slow.pos);
+                }
+            }
+        }
+        assert!(Huffman::new(&[1, 1, 1]).is_err());
+        assert!(Huffman::new(&[2, 2]).is_err());
+        assert!(Huffman::new(&[17]).is_err());
+    }
+
+    #[cfg(feature = "native")]
+    #[test]
+    fn overlapping_matches_and_mixed_literals_roundtrip() {
+        for period in [1, 2, 3, 7, 31, 255, 4096, 8192] {
+            let mut seed = 123u32;
+            let pattern: Vec<u8> = (0..period)
+                .map(|_| {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 17;
+                    seed ^= seed << 5;
+                    seed as u8
+                })
+                .collect();
+            let input: Vec<u8> = pattern
+                .iter()
+                .copied()
+                .cycle()
+                .take(crate::PACK_BLOCK_SIZE)
+                .collect();
+            let encoded = encode_block(&input);
+            assert!(encoded.len() < input.len());
+            let mut output = Vec::new();
+            decode(&encoded, input.len(), &mut output).unwrap();
+            assert_eq!(output, input);
+            // Reusing a buffer must reset its length and match history.
+            decode(&encoded, input.len(), &mut output).unwrap();
+            assert_eq!(output, input);
+        }
+    }
+}

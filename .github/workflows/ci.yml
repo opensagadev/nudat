@@ -38,3 +38,12 @@ jobs:
         run: cargo test --locked -p nudat --no-default-features
       - name: Build portable library for WebAssembly
         run: cargo build --locked -p nudat --no-default-features --target wasm32-unknown-unknown
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - name: Build WebAssembly
+        run: cargo build --locked -p nudat-web --release --target wasm32-unknown-unknown

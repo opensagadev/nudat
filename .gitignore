@@ -1,5 +1,6 @@
 /target/
 /dist/
+/demo/
 /.cargo-home/
 /obb/
 /game.dat/
