@@ -1,0 +1,20 @@
+[package]
+name = "nudat-cli"
+version = "0.1.0"
+edition = "2021"
+description = "CLI for Traveller's Tales Nu engine DAT archives"
+license = "MIT"
+repository = "https://github.com/opensagadev/nudat"
+
+[[bin]]
+name = "nudat"
+path = "src/main.rs"
+
+[dependencies]
+nudat = { path = "..", version = "0.1.0" }
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+indicatif = "0.18"
+rayon = "1"
+
+tempfile = "3"

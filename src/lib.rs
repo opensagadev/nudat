@@ -172,7 +172,15 @@ struct EncodedTree {
     name_offsets: Vec<u32>,
 }
 
+/// Compatibility name for callers that manage their own reader.
+pub type ArchiveIndex = Archive;
+
 impl Archive {
+    /// Parse an archive index from a caller-owned reader.
+    pub fn from_reader(reader: &mut (impl Read + Seek)) -> Result<Self> {
+        Self::new(reader)
+    }
+
     pub fn new(file: &mut (impl Read + Seek)) -> Result<Self> {
         let file_len = file.seek(SeekFrom::End(0))?;
         file.seek(SeekFrom::Start(0))?;

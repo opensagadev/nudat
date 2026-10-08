@@ -16,14 +16,25 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-          targets: wasm32-unknown-unknown
       - name: Check formatting
         run: cargo fmt --all --check
       - name: Lint
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
       - name: Test
-        run: cargo test --all-targets
-      - name: Check portable library
-        run: cargo check --locked --lib --no-default-features --target wasm32-unknown-unknown
+        run: cargo test --locked --workspace
       - name: Build release
-        run: cargo build --release
+        run: cargo build --locked --release -p nudat-cli
+  portable:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: wasm32-unknown-unknown
+      - name: Lint portable library
+        run: cargo clippy --locked -p nudat --no-default-features --all-targets -- -D warnings
+      - name: Test portable library
+        run: cargo test --locked -p nudat --no-default-features
+      - name: Build portable library for WebAssembly
+        run: cargo build --locked -p nudat --no-default-features --target wasm32-unknown-unknown

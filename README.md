@@ -13,7 +13,7 @@ PC `.DAT` (including the older `MkDat V3.26` variant), Android `.dat`, and Andro
 Build the release CLI:
 
 ```sh
-cargo build --release
+cargo build --release -p nudat-cli
 ```
 
 The executable is `./target/release/nudat`. Commands below use `nudat` for brevity.
@@ -59,32 +59,81 @@ Run `nudat <command> --help` for every option.
 
 ## Rust library and CLI
 
+This workspace separates the reusable `nudat` library (root package) from
+`nudat-cli` (`cli/`), which produces the `nudat` executable. The library has no
+CLI, argument-parsing, or terminal-progress dependencies.
+
 The library has no filesystem or threading dependencies. `Archive::new(&mut reader)`
-parses a `Read + Seek` source; `read`, `copy_to`, and `verify` take that source
-explicitly. `ReaderArchive::new(reader)` owns a reader for repeated operations.
-Use `ArchiveWriter` with a `Write + Seek` destination to pack or rewrite an
-archive. `encode_payload` produces game-compatible compressed chunks;
-`add_encoded` also preserves stored payloads byte-for-byte while editing.
-
-```rust
-use std::io::Cursor;
-use nudat::{ArchiveWriter, Format, ReaderArchive};
-
-let mut writer = ArchiveWriter::new(Cursor::new(Vec::new()), Format::Pc)?;
-writer.add_raw("hello.txt", &mut &b"Hello"[..], 5)?;
-let bytes = writer.finish()?.into_inner();
-let mut archive = ReaderArchive::new(Cursor::new(bytes))?;
-assert_eq!(archive.read("HELLO.TXT")?, b"Hello");
-# Ok::<(), nudat::NudatError>(())
-```
-
-Library consumers should disable the default CLI feature:
-`nudat = { version = "0.1", default-features = false }`.
-Files, directories, temporary staging, and parallel processing live exclusively
-in the CLI's private `filesystem` module. The browser application lives in
+(or `ArchiveIndex::from_reader`) parses a `Read + Seek` source. `ReaderArchive`
+owns the reader for repeated reads. `ArchiveWriter` packs or rewrites archives
+through any `Write + Seek` destination; `encode_payload` provides compression.
+Files, directories, temporary staging, and parallel operations live exclusively
+in `cli/src/filesystem.rs`. The browser application lives in
 [opensaga.dev](https://github.com/opensagadev/opensaga.dev).
 
 The CLI runs packing and unpacking in parallel, reports progress on stderr, and writes decoded `cat` bytes directly to stdout.
+
+### Portable reader
+
+The library is portable by default, including WebAssembly. It has no native or
+CLI feature to enable or disable:
+
+```toml
+[dependencies]
+nudat = { git = "https://github.com/opensagadev/nudat" }
+```
+
+`ArchiveIndex` parses any `Read + Seek` source, including `Cursor<&[u8]>`:
+
+```rust
+use nudat::{ArchiveIndex, Result};
+use std::io::Cursor;
+
+fn extract(archive_bytes: &[u8], entry_path: &str) -> Result<Vec<u8>> {
+    let mut source = Cursor::new(archive_bytes);
+    let index = ArchiveIndex::from_reader(&mut source)?;
+    index.read(&mut source, entry_path)
+}
+```
+
+Indexing reads metadata, leaving payloads in the source. `entries()` lists files;
+`copy_to(&mut source, path, &mut writer)` streams a decoded entry, and
+`verify(&mut source)` checks every entry. Always supply the same archive data used
+to build the index. Folder selection can filter entries by their `/`-separated
+path prefix.
+
+The portable library builds for `wasm32-unknown-unknown`. It is not yet a JavaScript
+package: a browser integration still needs a WebAssembly binding and browser file
+I/O. `Cursor` requires the bytes in memory; asynchronous range reads for large
+browser files need an adapter or additional API work. Website UI and styling can
+stay in the consuming website repository.
+
+```sh
+rustup target add wasm32-unknown-unknown
+cargo build -p nudat --no-default-features --target wasm32-unknown-unknown
+cargo test -p nudat --no-default-features
+```
+
+## CLI releases
+
+The CLI release workflow builds Windows x64, Linux x64 (Ubuntu 22.04/glibc),
+macOS Intel, and macOS Apple Silicon binaries. Windows downloads are ZIP files;
+Linux and macOS downloads are tar.gz files. Each includes `nudat`, this README,
+and the MIT license. Releases include a `SHA256SUMS` file for verification.
+
+To release, update `cli/Cargo.toml` and `Cargo.lock`, merge the changes, and push
+a tag matching the CLI version, for example `nudat-cli-v0.1.0`. The workflow
+rejects tags that do not match `cli/Cargo.toml`. CLI and library versions can
+advance independently.
+
+All four builds must pass their workspace tests and extracted-binary smoke tests
+before the workflow creates a **draft GitHub Release** with generated notes and
+the downloads. Review the draft and publish it from GitHub Releases. Prerelease
+versions such as `nudat-cli-v0.2.0-rc.1` are marked as prereleases. Reruns may update
+draft assets but will not overwrite published releases.
+
+Pull requests and manual workflow runs build downloadable Actions artifacts
+without creating releases. This workflow does not publish packages to crates.io.
 
 ## Archive formats
 
