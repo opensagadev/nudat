@@ -9,13 +9,22 @@ readme = "README.md"
 keywords = ["archive", "dat", "obb", "modding"]
 categories = ["command-line-utilities", "encoding", "games"]
 
+[features]
+default = ["cli"]
+cli = ["dep:anyhow", "dep:clap", "dep:indicatif", "dep:rayon", "dep:tempfile"]
+
+[[bin]]
+name = "nudat"
+path = "src/main.rs"
+required-features = ["cli"]
+
 [dependencies]
-anyhow = "1"
+anyhow = { version = "1", optional = true }
 binrw = "0.15"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive"], optional = true }
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
-indicatif = "0.18"
+indicatif = { version = "0.18", optional = true }
 miniz_oxide = "0.9"
-rayon = "1"
-tempfile = "3"
+rayon = { version = "1", optional = true }
+tempfile = { version = "3", optional = true }
 thiserror = "2"

@@ -1,4 +1,8 @@
-use nudat::{pack, pack_with_progress, Archive, Compression, Format, NudatError, PackPhase};
+#[path = "../src/filesystem.rs"]
+#[allow(dead_code)]
+mod filesystem;
+use filesystem::{pack, pack_with_progress, Archive, PackPhase};
+use nudat::{Compression, Format, NudatError};
 use std::collections::HashSet;
 use std::fs;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -524,4 +528,41 @@ fn pack_rejects_an_index_past_the_game_loader_limit() {
     let output = temp.path().join("too_large.dat");
     let error = pack(&input, &output, Format::Pc).unwrap_err();
     assert!(error.to_string().contains("2 GiB loader limit"));
+}
+
+#[test]
+fn seekable_reader_matches_disk_api_for_all_formats() {
+    use nudat::ReaderArchive;
+    use std::io::Cursor;
+    for format in [Format::Pc, Format::PcLegacy, Format::Android, Format::Obb] {
+        let temp = tempdir().unwrap();
+        let input = temp.path().join("input");
+        fs::create_dir_all(input.join("Levels")).unwrap();
+        let payload = b"compressible archive contents\n".repeat(4000);
+        fs::write(input.join("Levels/test.ghg"), &payload).unwrap();
+        fs::write(input.join("empty.bin"), []).unwrap();
+        let output = temp.path().join("archive.dat");
+        pack(&input, &output, format).unwrap();
+        let disk = Archive::open(&output).unwrap();
+        let mut reader = ReaderArchive::new(Cursor::new(fs::read(&output).unwrap())).unwrap();
+        assert_eq!(reader.version(), disk.version());
+        assert_eq!(reader.format(), Some(format));
+        assert_eq!(reader.entries().len(), disk.entries().len());
+        // Reader owns its data and does not reopen the source file.
+        fs::remove_file(&output).unwrap();
+        assert_eq!(reader.read("levels\\TEST.GHG").unwrap(), payload);
+        assert_eq!(reader.read("empty.bin").unwrap(), b"");
+        reader.verify().unwrap();
+        assert!(matches!(
+            reader.read("missing"),
+            Err(NudatError::MissingEntry(_))
+        ));
+        let mut streamed = Vec::new();
+        assert_eq!(
+            reader.copy_to("Levels/test.ghg", &mut streamed).unwrap(),
+            payload.len() as u64
+        );
+        assert_eq!(streamed, payload);
+    }
+    assert!(ReaderArchive::new(Cursor::new(vec![0; 16])).is_err());
 }

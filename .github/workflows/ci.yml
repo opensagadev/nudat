@@ -16,11 +16,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+          targets: wasm32-unknown-unknown
       - name: Check formatting
         run: cargo fmt --all --check
       - name: Lint
         run: cargo clippy --all-targets -- -D warnings
       - name: Test
         run: cargo test --all-targets
+      - name: Check portable library
+        run: cargo check --locked --lib --no-default-features --target wasm32-unknown-unknown
       - name: Build release
         run: cargo build --release

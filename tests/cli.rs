@@ -1,4 +1,8 @@
-use nudat::{pack, Archive, Format};
+#[path = "../src/filesystem.rs"]
+#[allow(dead_code)]
+mod filesystem;
+use filesystem::{pack, Archive};
+use nudat::Format;
 use std::fs;
 use std::process::Command;
 use tempfile::TempDir;

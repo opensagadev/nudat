@@ -1,7 +1,10 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
-use nudat::{pack_with_progress, Archive, Entry, Format, PackPhase};
+#[cfg_attr(test, allow(dead_code))]
+mod filesystem;
+use filesystem::{pack_with_progress, Archive, PackPhase};
+use nudat::{Entry, Format};
 use rayon::ThreadPoolBuilder;
 use std::collections::BTreeMap;
 use std::io::{self, IsTerminal, Write};

@@ -59,7 +59,30 @@ Run `nudat <command> --help` for every option.
 
 ## Rust library and CLI
 
-The `nudat` crate exposes `Archive::open`, `entries`, `read`, `copy_to`, `extract`, `unpack`, `rewrite`, and `pack`, with progress variants for bulk operations. Entries stay on disk until read.
+The library has no filesystem or threading dependencies. `Archive::new(&mut reader)`
+parses a `Read + Seek` source; `read`, `copy_to`, and `verify` take that source
+explicitly. `ReaderArchive::new(reader)` owns a reader for repeated operations.
+Use `ArchiveWriter` with a `Write + Seek` destination to pack or rewrite an
+archive. `encode_payload` produces game-compatible compressed chunks;
+`add_encoded` also preserves stored payloads byte-for-byte while editing.
+
+```rust
+use std::io::Cursor;
+use nudat::{ArchiveWriter, Format, ReaderArchive};
+
+let mut writer = ArchiveWriter::new(Cursor::new(Vec::new()), Format::Pc)?;
+writer.add_raw("hello.txt", &mut &b"Hello"[..], 5)?;
+let bytes = writer.finish()?.into_inner();
+let mut archive = ReaderArchive::new(Cursor::new(bytes))?;
+assert_eq!(archive.read("HELLO.TXT")?, b"Hello");
+# Ok::<(), nudat::NudatError>(())
+```
+
+Library consumers should disable the default CLI feature:
+`nudat = { version = "0.1", default-features = false }`.
+Files, directories, temporary staging, and parallel processing live exclusively
+in the CLI's private `filesystem` module. The browser application lives in
+[opensaga.dev](https://github.com/opensagadev/opensaga.dev).
 
 The CLI runs packing and unpacking in parallel, reports progress on stderr, and writes decoded `cat` bytes directly to stdout.
 
