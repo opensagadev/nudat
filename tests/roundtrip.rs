@@ -11,7 +11,7 @@ use std::time::Duration;
 use tempfile::TempDir;
 
 fn tempdir() -> std::io::Result<TempDir> {
-    tempfile::tempdir_in(concat!(env!("CARGO_MANIFEST_DIR"), "/../target"))
+    tempfile::tempdir_in(concat!(env!("CARGO_MANIFEST_DIR"), "/target"))
 }
 
 #[test]

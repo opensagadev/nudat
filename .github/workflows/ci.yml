@@ -19,11 +19,11 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all --check
       - name: Lint
-        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
       - name: Test
-        run: cargo test --locked --workspace
+        run: cargo test --locked
       - name: Build release
-        run: cargo build --locked --release -p nudat-cli
+        run: cargo build --locked --release
   portable:
     runs-on: ubuntu-latest
     steps:
@@ -33,8 +33,8 @@ jobs:
           components: clippy
           targets: wasm32-unknown-unknown
       - name: Lint portable library
-        run: cargo clippy --locked -p nudat --no-default-features --all-targets -- -D warnings
+        run: cargo clippy --locked --no-default-features --all-targets -- -D warnings
       - name: Test portable library
-        run: cargo test --locked -p nudat --no-default-features
+        run: cargo test --locked --no-default-features
       - name: Build portable library for WebAssembly
-        run: cargo build --locked -p nudat --no-default-features --target wasm32-unknown-unknown
+        run: cargo build --locked --no-default-features --target wasm32-unknown-unknown
