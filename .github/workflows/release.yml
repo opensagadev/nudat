@@ -1,10 +1,15 @@
-name: CLI release
+name: Release
 
 on:
   push:
     tags: ['nudat-cli-v*']
   pull_request:
   workflow_dispatch:
+    inputs:
+      dry-run:
+        description: Build and verify the release without publishing anything
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -54,10 +59,67 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
-  release:
-    name: Create draft release
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/nudat-cli-v')
+  crates:
+    name: Publish to crates.io
+    if: github.event_name == 'workflow_dispatch'
     needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      id-token: write
+    outputs:
+      tag: ${{ steps.publish.outputs.tag }}
+    steps:
+      - name: Require main for releases
+        if: ${{ !inputs.dry-run && github.ref != 'refs/heads/main' }}
+        run: |
+          echo 'Releases must be dispatched from main.' >&2
+          exit 1
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: rust-lang/crates-io-auth-action@v1
+        if: ${{ !inputs.dry-run }}
+        id: auth
+      - name: Publish crates
+        id: publish
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+          GH_TOKEN: ${{ github.token }}
+          DRY_RUN: ${{ inputs.dry-run }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$DRY_RUN" == true ]]; then
+            cargo publish --locked --workspace --dry-run
+            exit 0
+          fi
+          tag="nudat-cli-v$(cargo metadata --locked --no-deps --format-version 1 |
+            jq -r '.packages[] | select(.name == "nudat-cli") | .version')"
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft 2>/dev/null | grep -qx false; then
+            echo "Release $tag is already published; bump the versions in Cargo.toml." >&2
+            exit 1
+          fi
+          # Publish in dependency order and skip versions that already exist, so reruns are safe.
+          for crate in nudat nudat-cli; do
+            version="$(cargo metadata --locked --no-deps --format-version 1 |
+              jq -r --arg crate "$crate" '.packages[] | select(.name == $crate) | .version')"
+            if curl -fs -A "$GITHUB_REPOSITORY release workflow" -o /dev/null \
+              "https://crates.io/api/v1/crates/$crate/$version"; then
+              echo "$crate $version is already on crates.io, skipping."
+            else
+              cargo publish --locked -p "$crate"
+            fi
+          done
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+  release:
+    name: Create GitHub release
+    if: >-
+      !cancelled() && needs.build.result == 'success' && (
+        (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/nudat-cli-v')) ||
+        (github.event_name == 'workflow_dispatch' && !inputs.dry-run && needs.crates.result == 'success')
+      )
+    needs: [build, crates]
     runs-on: ubuntu-22.04
     permissions:
       contents: write
@@ -72,7 +134,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ github.event_name == 'push' && github.ref_name || needs.crates.outputs.tag }}
         shell: bash
         run: |
           set -euo pipefail
@@ -87,7 +149,12 @@ jobs:
             version="${RELEASE_TAG#nudat-cli-v}"
             flags=()
             if [[ "$version" == *-* ]]; then flags+=(--prerelease); fi
-            gh release create "$RELEASE_TAG" --verify-tag --draft \
-              --title "nudat CLI $version" --generate-notes "${flags[@]}"
+            if [[ "$GITHUB_EVENT_NAME" == push ]]; then flags+=(--verify-tag); else flags+=(--target "$GITHUB_SHA"); fi
+            gh release create "$RELEASE_TAG" --draft \
+              --title "nudat $version" --generate-notes "${flags[@]}"
           fi
           gh release upload "$RELEASE_TAG" ./*.zip ./*.tar.gz SHA256SUMS --clobber
+          # Tag pushes leave a draft for review; manual releases publish once all assets are attached.
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
+            gh release edit "$RELEASE_TAG" --draft=false
+          fi
