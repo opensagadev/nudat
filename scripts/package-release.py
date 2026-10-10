@@ -17,12 +17,12 @@ def main():
     parser.add_argument("--target")
     args = parser.parse_args()
     root = Path(__file__).resolve().parent.parent
-    with (root / "cli/Cargo.toml").open("rb") as manifest:
+    with (root / "Cargo.toml").open("rb") as manifest:
         version = tomllib.load(manifest)["package"]["version"]
     if args.check_tag:
         tag = os.environ.get("RELEASE_TAG", "")
-        if tag != f"nudat-cli-v{version}":
-            parser.error(f"tag {tag!r} must match CLI version nudat-cli-v{version}")
+        if tag != f"v{version}":
+            parser.error(f"tag {tag!r} must match crate version v{version}")
         return
     if not args.target:
         parser.error("--target is required when packaging")
@@ -30,7 +30,7 @@ def main():
     windows = "-windows-" in args.target
     binary_name = "nudat.exe" if windows else "nudat"
     binary = root / "target" / args.target / "release" / binary_name
-    bundle = f"nudat-cli-v{version}-{args.target}"
+    bundle = f"nudat-v{version}-{args.target}"
     dist = root / "dist"
     dist.mkdir(exist_ok=True)
     archive = dist / (bundle + (".zip" if windows else ".tar.gz"))

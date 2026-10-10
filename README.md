@@ -10,13 +10,15 @@ PC `.DAT` (including the older `MkDat V3.26` variant), Android `.dat`, and Andro
 
 ## Usage
 
-Build the release CLI:
+Install the CLI from crates.io, or download a prebuilt binary from
+[GitHub Releases](https://github.com/opensagadev/nudat/releases):
 
 ```sh
-cargo build --release -p nudat-cli
+cargo install nudat
 ```
 
-The executable is `./target/release/nudat`. Commands below use `nudat` for brevity.
+To build from a checkout, run `cargo build --release`; the executable is
+`./target/release/nudat`.
 
 ```sh
 nudat info GAME.DAT
@@ -59,28 +61,28 @@ Run `nudat <command> --help` for every option.
 
 ## Rust library and CLI
 
-This workspace separates the reusable `nudat` library (root package) from
-`nudat-cli` (`cli/`), which produces the `nudat` executable. The library has no
-CLI, argument-parsing, or terminal-progress dependencies.
+The `nudat` crate contains both the library and the `nudat` executable. The
+executable and its dependencies (argument parsing, terminal progress, threading,
+temporary files) sit behind the default `cli` feature; library users can disable
+it with `default-features = false`.
 
-The library has no filesystem or threading dependencies. `Archive::new(&mut reader)`
+The library itself has no filesystem or threading dependencies. `Archive::new(&mut reader)`
 (or `ArchiveIndex::from_reader`) parses a `Read + Seek` source. `ReaderArchive`
 owns the reader for repeated reads. `ArchiveWriter` packs or rewrites archives
 through any `Write + Seek` destination; `encode_payload` provides compression.
 Files, directories, temporary staging, and parallel operations live exclusively
-in `cli/src/filesystem.rs`. The browser application lives in
+in the CLI's `src/filesystem.rs`. The browser application lives in
 [opensaga.dev](https://github.com/opensagadev/opensaga.dev).
 
 The CLI runs packing and unpacking in parallel, reports progress on stderr, and writes decoded `cat` bytes directly to stdout.
 
 ### Portable reader
 
-The library is portable by default, including WebAssembly. It has no native or
-CLI feature to enable or disable:
+Without the `cli` feature, the library is portable, including WebAssembly:
 
 ```toml
 [dependencies]
-nudat = { git = "https://github.com/opensagadev/nudat" }
+nudat = { version = "0.1", default-features = false }
 ```
 
 `ArchiveIndex` parses any `Read + Seek` source, including `Cursor<&[u8]>`:
@@ -110,30 +112,30 @@ stay in the consuming website repository.
 
 ```sh
 rustup target add wasm32-unknown-unknown
-cargo build -p nudat --no-default-features --target wasm32-unknown-unknown
-cargo test -p nudat --no-default-features
+cargo build --no-default-features --target wasm32-unknown-unknown
+cargo test --no-default-features
 ```
 
-## CLI releases
+## Releases
 
-The CLI release workflow builds Windows x64, Linux x64 (Ubuntu 22.04/glibc),
+The release workflow builds Windows x64, Linux x64 (Ubuntu 22.04/glibc),
 macOS Intel, and macOS Apple Silicon binaries. Windows downloads are ZIP files;
 Linux and macOS downloads are tar.gz files. Each includes `nudat`, this README,
 and the MIT license. Releases include a `SHA256SUMS` file for verification.
 
-To release, update `cli/Cargo.toml` and `Cargo.lock`, merge the changes, and push
-a tag matching the CLI version, for example `nudat-cli-v0.1.0`. The workflow
-rejects tags that do not match `cli/Cargo.toml`. CLI and library versions can
-advance independently.
+To release, bump the version in `Cargo.toml` and `Cargo.lock`, merge to `main`,
+and run the **Release** workflow manually from `main`. All four builds must pass
+their tests and extracted-binary smoke tests; the workflow then publishes the
+crate to crates.io and creates a GitHub Release tagged `vX.Y.Z` with generated
+notes and the downloads. Enable **dry-run** to build and verify without
+publishing. Reruns skip versions already on crates.io and will not overwrite
+published releases.
 
-All four builds must pass their workspace tests and extracted-binary smoke tests
-before the workflow creates a **draft GitHub Release** with generated notes and
-the downloads. Review the draft and publish it from GitHub Releases. Prerelease
-versions such as `nudat-cli-v0.2.0-rc.1` are marked as prereleases. Reruns may update
-draft assets but will not overwrite published releases.
-
-Pull requests and manual workflow runs build downloadable Actions artifacts
-without creating releases. This workflow does not publish packages to crates.io.
+Pushing a `vX.Y.Z` tag instead creates a **draft** GitHub Release for review
+without publishing to crates.io; the workflow rejects tags that do not match
+`Cargo.toml`. Prerelease versions such as `v0.2.0-rc.1` are marked as
+prereleases. Pull requests build downloadable Actions artifacts without
+creating releases.
 
 ## Archive formats
 

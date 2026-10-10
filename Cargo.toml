@@ -1,11 +1,6 @@
-[workspace]
-members = ["cli"]
-default-members = [".", "cli"]
-resolver = "2"
-
 [package]
 name = "nudat"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Read and edit Traveller's Tales Nu engine DAT archives"
 license = "MIT"
@@ -14,8 +9,31 @@ readme = "README.md"
 keywords = ["archive", "dat", "obb", "modding"]
 categories = ["command-line-utilities", "encoding", "games"]
 
+[features]
+default = ["cli"]
+cli = ["dep:anyhow", "dep:clap", "dep:indicatif", "dep:rayon", "dep:tempfile"]
+
+[[bin]]
+name = "nudat"
+path = "src/main.rs"
+required-features = ["cli"]
+
+[[test]]
+name = "cli"
+required-features = ["cli"]
+
+[[test]]
+name = "roundtrip"
+required-features = ["cli"]
+
 [dependencies]
 binrw = "0.15"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 miniz_oxide = "0.9"
 thiserror = "2"
+
+anyhow = { version = "1", optional = true }
+clap = { version = "4", features = ["derive"], optional = true }
+indicatif = { version = "0.18", optional = true }
+rayon = { version = "1", optional = true }
+tempfile = { version = "3", optional = true }
