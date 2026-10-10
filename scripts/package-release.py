@@ -60,7 +60,7 @@ def main():
     with archive.open("rb") as contents:
         checksum = hashlib.file_digest(contents, "sha256").hexdigest()
     archive.with_name(archive.name + ".sha256").write_text(
-        f"{checksum}  {archive.name}\n", encoding="utf-8"
+        f"{checksum}  {archive.name}\n", encoding="utf-8", newline="\n"
     )
     print(archive)
 
